@@ -40,14 +40,10 @@ For Claude Code, all of this ships as one **plugin**: this repo is the plugin, w
 
 Requires [`uv`](https://docs.astral.sh/uv/).
 
-```bash
-git clone https://github.com/swinshu1/huddlehut.git && cd huddlehut && uv sync
-```
-
-**Claude Code** (plugin), from the clone:
+**Claude Code** (plugin), straight from GitHub:
 
 ```bash
-claude plugin marketplace add "$(pwd)"
+claude plugin marketplace add swinshu1/huddlehut
 ```
 
 ```bash
@@ -62,10 +58,10 @@ The plugin asks for three options; all can be left empty:
 | Anthropic API key | empty means `ANTHROPIC_API_KEY` from your environment |
 | Agent name | `claude-code` |
 
-**Codex** (MCP server + hooks):
+**Codex** (MCP server + hooks), from a clone:
 
 ```bash
-uv run huddlehut install codex
+git clone https://github.com/swinshu1/huddlehut.git && cd huddlehut && uv sync && uv run huddlehut install codex
 ```
 
 Then run `/hooks` in Codex and trust the huddlehut hooks. Codex skips hooks you haven't trusted.
@@ -195,3 +191,7 @@ uv run pytest -q
 ```
 
 Storage, compaction and hook tests run against both SQLite and a real embedded Postgres (`pgserver`).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

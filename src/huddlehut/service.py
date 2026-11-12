@@ -9,10 +9,10 @@ import time
 from pathlib import Path
 
 from .distill import distill
-from .store import Board, Store
+from .store import Board, Store, env
 
 # Who is posting. Set per client in its MCP config (e.g. "claude-code", "codex").
-DEFAULT_AGENT = os.environ.get("HUDDLEHUT_AGENT", "agent")
+DEFAULT_AGENT = env("HUDDLEHUT_AGENT") or "agent"
 STALE_PENDING_SECONDS = 600
 
 

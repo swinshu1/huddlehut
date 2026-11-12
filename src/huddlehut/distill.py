@@ -8,7 +8,7 @@ import anthropic
 from pydantic import BaseModel, Field
 
 from .compact import render_entries
-from .store import Board, Message, Store
+from .store import Board, Message, Store, env
 
 MODEL = os.environ.get("HUDDLEHUT_MODEL", "claude-opus-5-5")
 SPARSE_SIGNAL_CHARS = 1500  # below this, include notes too
@@ -75,7 +75,7 @@ def distill(store: Store, board_id: str, client: anthropic.Anthropic | None = No
         store.set_distill_status(board_id, "done")
         return []
     try:
-        client = client or anthropic.Anthropic(api_key=os.environ.get("HUDDLEHUT_ANTHROPIC_API_KEY") or None)
+        client = client or anthropic.Anthropic(api_key=env("HUDDLEHUT_ANTHROPIC_API_KEY"))
         response = client.beta.messages.parse(
             model=MODEL,
             max_tokens=16000,

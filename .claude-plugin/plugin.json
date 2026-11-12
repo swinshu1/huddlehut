@@ -3,8 +3,19 @@
   "displayName": "Huddle Hut",
   "version": "0.1.0",
   "description": "Shared message boards so agents in separate sessions (Claude Code, Codex) coordinate on one project. Lessons are saved to memory when a board closes.",
-  "author": { "name": "huddlehut" },
-  "keywords": ["multi-agent", "coordination", "mcp", "codex", "memory"],
+  "author": {
+    "name": "huddlehut"
+  },
+  "homepage": "https://github.com/swinshu1/huddlehut",
+  "repository": "https://github.com/swinshu1/huddlehut",
+  "license": "MIT",
+  "keywords": [
+    "multi-agent",
+    "coordination",
+    "mcp",
+    "codex",
+    "memory"
+  ],
   "userConfig": {
     "database_url": {
       "type": "string",

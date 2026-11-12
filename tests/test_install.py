@@ -29,3 +29,12 @@ def test_config_file_selects_backend_and_is_private(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUDE_PLUGIN_OPTION_DATABASE_URL")
     install.set_database("")
     assert install.describe().startswith("SQLite file")
+
+
+def test_unset_plugin_options_are_ignored(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "CONFIG_FILE", tmp_path / "none.json")
+    monkeypatch.delenv("HUDDLEHUT_DB", raising=False)
+    monkeypatch.setenv("HUDDLEHUT_DATABASE_URL", "${user_config.database_url}")
+    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_DATABASE_URL", "")
+    assert store.database_url() == str(store.DEFAULT_SQLITE)
+    assert store.env("HUDDLEHUT_DATABASE_URL") is None

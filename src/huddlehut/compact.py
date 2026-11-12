@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .store import Board, Message, Store, fmt_message
+from .store import Board, Message, Store, env, fmt_message
 
 MODEL = os.environ.get("HUDDLEHUT_COMPACT_MODEL", os.environ.get("HUDDLEHUT_MODEL", "claude-opus-5-5"))
 COMPACT_AFTER_CHARS = int(os.environ.get("HUDDLEHUT_COMPACT_AFTER_CHARS", "6000"))  # ~1.5K tokens
@@ -70,7 +70,7 @@ def compact(store: Store, board_id: str, client=None, force: bool = False) -> bo
             import anthropic  # imported lazily: hooks render views without paying for the SDK import
 
             client = anthropic.Anthropic(
-                api_key=os.environ.get("HUDDLEHUT_ANTHROPIC_API_KEY") or None, timeout=JOIN_TIMEOUT, max_retries=0
+                api_key=env("HUDDLEHUT_ANTHROPIC_API_KEY"), timeout=JOIN_TIMEOUT, max_retries=0
             )
         prompt = (
             f"Project: {board.project}\nGoal: {board.goal or '-'}\n\n"

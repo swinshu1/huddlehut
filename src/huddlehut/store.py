@@ -26,12 +26,19 @@ DEFAULT_SQLITE = HOME / "board.db"
 CONFIG_FILE = HOME / "config.json"
 
 
+def env(name: str) -> str | None:
+    """An env var's value, ignoring empty values and unresolved "${...}" placeholders (a plugin
+    option the user never set can arrive either way)."""
+    v = os.environ.get(name, "").strip()
+    return v if v and not v.startswith("${") else None
+
+
 def database_url() -> str:
     """Env first (HUDDLEHUT_DATABASE_URL; HUDDLEHUT_DB for a SQLite path; the Claude Code plugin's
     database_url option), then ~/.huddlehut/config.json, then the local SQLite file."""
     for var in ("HUDDLEHUT_DATABASE_URL", "HUDDLEHUT_DB", "CLAUDE_PLUGIN_OPTION_DATABASE_URL"):
-        if os.environ.get(var):
-            return os.environ[var]
+        if env(var):
+            return env(var)
     try:
         url = json.loads(CONFIG_FILE.read_text()).get("database_url")
         if url:

@@ -3,6 +3,9 @@ name = "huddlehut"
 version = "0.1.0"
 description = "Shared message boards for agents in separate sessions, with lessons distilled to memory on close"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["mcp", "claude-code", "codex", "multi-agent", "coordination"]
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=2.8.0",
@@ -10,6 +13,10 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pydantic>=2.14.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/swinshu1/huddlehut"
+Repository = "https://github.com/swinshu1/huddlehut"
 
 [project.scripts]
 huddlehut = "huddlehut.cli:main"
