@@ -1,0 +1,27 @@
+[project]
+name = "huddlehut"
+version = "0.1.0"
+description = "Shared message boards for agents in separate sessions, with lessons distilled to memory on close"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=2.8.0",
+    "mcp>=2.3.0",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.14.3",
+]
+
+[project.scripts]
+huddlehut = "huddlehut.cli:main"
+huddlehut-mcp = "huddlehut.server:main"
+huddlehut-hook = "huddlehut.hook:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pgserver>=0.1.4",
+    "pytest>=9.2.0",
+]

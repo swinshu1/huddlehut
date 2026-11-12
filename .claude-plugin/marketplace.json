@@ -1,0 +1,12 @@
+{
+  "name": "huddlehut",
+  "owner": { "name": "huddlehut" },
+  "description": "Huddle Hut: shared message boards for agents in separate sessions.",
+  "plugins": [
+    {
+      "name": "huddlehut",
+      "source": "./",
+      "description": "Shared message boards so agents in separate sessions (Claude Code, Codex) coordinate, with lessons saved to memory."
+    }
+  ]
+}

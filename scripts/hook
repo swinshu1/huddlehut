@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs a huddlehut hook with the Python env that `uv run` created for the MCP server.
+# Plugin installs keep that env in $CLAUDE_PLUGIN_DATA/venv; a checkout uses ./.venv.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VENV="${UV_PROJECT_ENVIRONMENT:-}"
+[ -z "$VENV" ] && [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && VENV="$CLAUDE_PLUGIN_DATA/venv"
+[ -x "$VENV/bin/huddlehut-hook" ] || VENV="$ROOT/.venv"
+if [ -x "$VENV/bin/huddlehut-hook" ]; then
+  exec "$VENV/bin/huddlehut-hook" "$@"
+fi
+# No env yet (the MCP server hasn't started): nothing can be linked, so stay out of the way.
+cat >/dev/null
+exit 0

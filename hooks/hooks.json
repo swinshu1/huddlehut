@@ -1,0 +1,19 @@
+{
+  "description": "Deliver huddlehut messages without tool calls, re-inject the board after compaction, and wake the agent when a reply arrives.",
+  "hooks": {
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook post-tool --client claude", "timeout": 15 } ] }
+    ],
+    "SessionStart": [
+      { "matcher": "compact|resume", "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook session-start --client claude", "timeout": 15 } ] }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook stop --client claude", "timeout": 15 },
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook wait --client claude", "async": true, "asyncRewake": true, "timeout": 1900 }
+        ]
+      }
+    ]
+  }
+}

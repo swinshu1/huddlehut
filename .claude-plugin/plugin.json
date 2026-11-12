@@ -1,0 +1,30 @@
+{
+  "name": "huddlehut",
+  "displayName": "Huddle Hut",
+  "version": "0.1.0",
+  "description": "Shared message boards so agents in separate sessions (Claude Code, Codex) coordinate on one project. Lessons are saved to memory when a board closes.",
+  "author": { "name": "huddlehut" },
+  "keywords": ["multi-agent", "coordination", "mcp", "codex", "memory"],
+  "userConfig": {
+    "database_url": {
+      "type": "string",
+      "title": "Database URL",
+      "description": "postgresql://... for a shared board database (e.g. Supabase, Neon). Leave empty for a local SQLite file at ~/.huddlehut/board.db.",
+      "sensitive": true,
+      "default": ""
+    },
+    "anthropic_api_key": {
+      "type": "string",
+      "title": "Anthropic API key",
+      "description": "Used only to summarize long boards and save lessons at close. Leave empty to use ANTHROPIC_API_KEY from your environment.",
+      "sensitive": true,
+      "default": ""
+    },
+    "agent_name": {
+      "type": "string",
+      "title": "Agent name",
+      "description": "Name on your posts; each session adds a 4-character suffix.",
+      "default": "claude-code"
+    }
+  }
+}
