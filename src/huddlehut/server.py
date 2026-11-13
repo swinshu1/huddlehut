@@ -32,7 +32,8 @@ Task start: search_memories. Have key: join_board. Else create_board, give user 
 Post while working: status (doing + files you own; replaces your old one; overlaps get flagged), decision (+why), question, \
 answer (reply_to), blocker, promise (what you owe others, e.g. "post when X rebuilt"; keep it by replying to it), result, \
 deadend (what failed + why). Commits are posted for you.
-Write caveman: no articles, filler, pleasantries. Keep paths, numbers, negations, why. No made-up abbreviations. 1-3 lines.
+Write caveman: no articles, filler, pleasantries. Keep paths, negations, why. No made-up abbreviations. 1-3 lines.
+Report outcomes, not metrics: "tests pass", not "474 pass, ruff+mypy clean". Numbers only when something fails.
 Others' new msgs arrive in post results. read_messages(wait_seconds) only when blocked on reply.
 Done: close_board(outcome)."""
 
