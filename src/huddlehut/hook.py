@@ -3,21 +3,29 @@
 One entry point for Claude Code and Codex (`--client` picks the output format):
 
   post-tool      after every tool call. Links the client session to a board when the agent joins or
-                 creates one (from the "[b_… you=…]" marker in the result), then delivers others'
-                 unread messages as extra context. Checks at most every HUDDLEHUT_HOOK_INTERVAL s.
+                 creates one (from the "[b_… you=…]" marker in the result), then, at most every
+                 HUDDLEHUT_HOOK_INTERVAL s: delivers others' unread messages, records presence (working
+                 folder, branch), and warns once if another active agent shares this git checkout.
+                 After a `git commit`, posts the new commit id so others build on a fixed point.
+  pre-tool       before a Bash command that would commit, stash or discard changes: if those changes
+                 touch files another active agent claimed in its status, blocks the first attempt
+                 with an explanation. Running the same command again goes through.
   session-start  after compaction or resume: re-injects the board view (no model call).
-  stop           before the agent ends its turn: if a question, blocker or reply to it is unread,
-                 keeps it going with those messages (once; guarded by stop_hook_active).
+  stop           before the agent ends its turn: if a question, blocker or reply to it is unread, or
+                 it has an open promise it hasn't been reminded of, keeps it going once.
+  session-end    marks the agent as left; if it leaves promises unkept, posts a blocker saying so,
+                 so nobody waits forever.
   wait           Claude Code only, as an asyncRewake Stop hook: after the agent goes idle, waits up
                  to HUDDLEHUT_WAIT_SECONDS for something that needs it, then wakes it (exit 2).
 
 The read cursor is the same one the session's MCP server uses (cursors table, keyed by the agent
 name), so nothing is delivered twice. Sessions that never joined a board exit before touching the
-database, and nothing heavy is imported, so the hook adds little to each tool call.
+database or running git, and nothing heavy is imported, so the hook adds little to each tool call.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -30,10 +38,12 @@ HOME = Path(os.environ.get("HUDDLEHUT_HOME", Path.home() / ".huddlehut"))
 SESSIONS = HOME / "sessions"
 MARKER = re.compile(r"\[(b_[0-9a-f]{8}) you=([\w.-]+)\]")
 BOARD_TOOL = re.compile(r"^mcp__.*huddlehut.*__")
+RISKY_GIT = re.compile(r"\bgit\b.*\b(commit|stash|reset|checkout|restore|clean)\b")
 INTERVAL = float(os.environ.get("HUDDLEHUT_HOOK_INTERVAL", "5"))
 WAIT_SECONDS = float(os.environ.get("HUDDLEHUT_WAIT_SECONDS", "1800"))
 WAIT_POLL = float(os.environ.get("HUDDLEHUT_WAIT_POLL", "10"))
 WAIT_GRACE = 3  # let the synchronous Stop hook claim anything already unread
+GIT_INFO_TTL = 60
 MAX_LINES = 15
 MAX_CHARS = 4000  # under Codex's ~2.5K-token and Claude Code's 10K-char hook output caps
 
@@ -63,6 +73,100 @@ def unlink(session_id: str) -> None:
     _state_path(session_id).unlink(missing_ok=True)
 
 
+# ---- git --------------------------------------------------------------------
+
+
+def _git(cwd: str | None, *args: str) -> str | None:
+    import subprocess  # lazy: most hook calls never need it
+
+    if not cwd:
+        return None
+    try:
+        r = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _git_info(state: dict, cwd: str | None) -> dict:
+    """Toplevel and branch of the agent's working folder, cached for GIT_INFO_TTL seconds."""
+    cached = state.get("git") or {}
+    if cached.get("cwd") == cwd and time.time() - cached.get("at", 0) < GIT_INFO_TTL:
+        return cached
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    info = {"cwd": cwd, "at": time.time(), "toplevel": top,
+            "branch": _git(cwd, "rev-parse", "--abbrev-ref", "HEAD") if top else None}
+    state["git"] = info
+    return info
+
+
+def _head(cwd: str | None) -> tuple[str, str, float, str] | None:
+    out = _git(cwd, "log", "-1", "--format=%H%x09%h%x09%ct%x09%s")
+    if not out:
+        return None
+    full, short, ts, subject = (out.split("\t", 3) + ["", "", "0", ""])[:4]
+    return full, short, float(ts or 0), subject
+
+
+def _changed_files(cwd: str, staged_only: bool) -> set[str]:
+    def lines(*args):
+        return {ln for ln in (_git(cwd, *args) or "").splitlines() if ln}
+
+    files = lines("diff", "--cached", "--name-only")
+    if not staged_only:
+        files |= lines("diff", "--name-only") | lines("ls-files", "--others", "--exclude-standard")
+    return files
+
+
+def _risky_git(command: str) -> tuple[str, bool, str | None] | None:
+    """(verb for the warning, staged_only, -C dir) if the command would commit, stash or discard
+    changes; None for safe commands. Stash/reset/checkout/restore/clean hit the whole tree."""
+    import shlex
+
+    try:  # punctuation_chars splits out && ; | while keeping quoted text (commit messages) whole
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        tokens = command.split()
+    segments, cur = [], []
+    for tok in tokens:
+        if tok and set(tok) <= set("&|;"):
+            segments.append(cur)
+            cur = []
+        else:
+            cur.append(tok)
+    segments.append(cur)
+    adds_all = False
+    for t in segments:
+        if "git" not in t:
+            continue
+        i, cdir = t.index("git") + 1, None
+        while i < len(t) and t[i].startswith("-"):  # global options: -C dir, -c k=v
+            if t[i] in ("-C", "-c") and i + 1 < len(t):
+                cdir = t[i + 1] if t[i] == "-C" else cdir
+                i += 2
+            else:
+                i += 1
+        if i >= len(t):
+            continue
+        sub, rest = t[i], t[i + 1:]
+        if sub == "add" and any(a in ("-A", "--all", ".", "-u", "--update") for a in rest):
+            adds_all = True
+        elif sub == "commit":
+            all_flag = adds_all or any(a in ("-a", "--all") or re.fullmatch(r"-\w*a\w*", a) for a in rest)
+            return "commit", not all_flag, cdir
+        elif sub == "stash" and (not rest or rest[0] in ("push", "save", "-u", "--include-untracked", "-a")):
+            return "stash away", False, cdir
+        elif sub == "reset" and "--hard" in rest:
+            return "discard", False, cdir
+        elif sub in ("checkout", "restore") and "." in rest and "--staged" not in rest:
+            return "discard", False, cdir
+        elif sub == "clean" and any(re.fullmatch(r"-\w*f\w*", a) for a in rest):
+            return "delete", False, cdir
+    return None
+
+
 # ---- message selection and rendering ----------------------------------------
 
 
@@ -84,6 +188,10 @@ def _needs_me(store, board_id: str, me: str, msgs) -> list:
     return [m for m in msgs if m.kind in ("question", "blocker") or m.reply_to in mine or me in m.content]
 
 
+def _open_promises(store, board_id: str, me: str) -> list:
+    return [m for m in store.open_items(board_id) if m.kind == "promise" and m.author == me]
+
+
 def _take_unread(store, state: dict):
     """Unread messages from others; advances the shared cursor past them."""
     msgs = store.unread(state["board"], state["me"])
@@ -102,41 +210,138 @@ def _context(event: str, text: str) -> dict:
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
 
 
+def _snip(text: str, n: int = 60) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
 # ---- events -----------------------------------------------------------------
 
 
 def post_tool(inp: dict, client: str) -> dict | None:
     sid = inp.get("session_id") or ""
     tool = inp.get("tool_name") or ""
+    cwd = inp.get("cwd")
     now = time.time()
     if BOARD_TOOL.match(tool):
         m = MARKER.search(json.dumps(inp.get("tool_response"), ensure_ascii=False))
         state = load(sid)
         if m:
-            state = {"board": m.group(1), "me": m.group(2), "checked": now}
+            head = _head(cwd)
+            state = {"board": m.group(1), "me": m.group(2), "checked": 0, "last_sha": head[0] if head else None}
         if state:
             state["active"] = now
             save(sid, state)
         return None  # the board tool's own result already carried any new messages
     state = load(sid)
     if not state:
-        return None  # not on a board: no database access at all
+        return None  # not on a board: no database access, no git
     state["active"] = now
-    if now - state.get("checked", 0) < INTERVAL:
+    command = str((inp.get("tool_input") or {}).get("command", "")) if tool == "Bash" else ""
+    committed = "git" in command and "commit" in command
+    if not committed and now - state.get("checked", 0) < INTERVAL:
         save(sid, state)
         return None
     state["checked"] = now
-    save(sid, state)
     store = _store()
     board = store.get_board(state["board"])
+    notes = []
+
+    if committed and board.status == "open":
+        head = _head(cwd)
+        if head and head[0] != state.get("last_sha") and head[2] >= now - 300:
+            state["last_sha"] = head[0]
+            branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "?"
+            store.post_to(board, state["me"], f"committed {head[1]} ({branch}): {_snip(head[3], 80)}", "result")
+
+    info = _git_info(state, cwd)
+    store.touch(board.id, state["me"], cwd, info.get("toplevel"), info.get("branch"))
+    if info.get("toplevel"):
+        warned = set(state.get("warned_shared", []))
+        for agent, p in store.live_agents(board.id, exclude=state["me"]).items():
+            if p.get("toplevel") == info["toplevel"] and agent not in warned:
+                warned.add(agent)
+                repo = Path(info["toplevel"]).name
+                notes.append(
+                    f"{agent} works in the same checkout ({info['toplevel']}). Uncommitted edits from both "
+                    f"of you mix there. Safer: git worktree add ../{repo}-{state['me']} -b {state['me']}"
+                )
+        state["warned_shared"] = sorted(warned)
+
     msgs = _take_unread(store, state)
+    save(sid, state)
     if board.status != "open":
         unlink(sid)
         extra = "\n" + _render(store, msgs) if msgs else ""
         return _context("PostToolUse", f"[huddlehut] board {board.name} was closed.{extra}")
-    if not msgs:
+    parts = [f"[huddlehut {board.name}] new from others:\n" + _render(store, msgs)] if msgs else []
+    parts += [f"[huddlehut] {n}" for n in notes]
+    return _context("PostToolUse", "\n".join(parts)) if parts else None
+
+
+def pre_tool(inp: dict, client: str) -> dict | None:
+    """Speed bump before committing or discarding another active agent's claimed files."""
+    if inp.get("tool_name") != "Bash":
         return None
-    return _context("PostToolUse", f"[huddlehut {board.name}] new from others:\n" + _render(store, msgs))
+    command = str((inp.get("tool_input") or {}).get("command", ""))
+    if not RISKY_GIT.search(command):
+        return None
+    sid = inp.get("session_id") or ""
+    state = load(sid)
+    if not state:
+        return None
+    risky = _risky_git(command)
+    if not risky:
+        return None
+    verb, staged_only, cdir = risky
+    cwd = inp.get("cwd") or "."
+    gdir = os.path.join(cwd, cdir) if cdir else cwd
+    toplevel = _git(gdir, "rev-parse", "--show-toplevel")
+    if not toplevel:
+        return None
+    files = _changed_files(gdir, staged_only)
+    if not files:
+        return None
+    digest = hashlib.sha1(command.encode()).hexdigest()[:12]
+    if digest in state.get("guard_passed", []):
+        return None  # second attempt: the agent has seen the warning and chose to proceed
+
+    from .claims import _overlap, claimed_paths
+    from .compact import _age
+    from .store import IDLE_AFTER
+
+    store = _store()
+    live = store.live_agents(state["board"], exclude=state["me"])
+    now = time.time()
+    conflicts = []
+    for s in store.current_statuses(state["board"]):
+        if s.author == state["me"]:
+            continue
+        p = live.get(s.author)
+        if not p and now - s.created_at > IDLE_AFTER:
+            continue  # owner gone or idle: its claim is stale
+        if p and p.get("toplevel") and p["toplevel"] != toplevel:
+            continue  # different checkout or worktree: no collision
+        claims = {c[len(toplevel) + 1:] if c.startswith(toplevel + "/") else c for c in claimed_paths(s.content)}
+        hit = sorted(f for f in files if any(_overlap(f, c) for c in claims))
+        if hit:
+            seen = p["seen_at"] if p else s.created_at
+            conflicts.append((s, hit, _age(now - seen)))
+    if not conflicts:
+        return None
+    state.setdefault("guard_passed", []).append(digest)
+    save(sid, state)
+    lines = [
+        f"{', '.join(hit[:5])}{' …' if len(hit) > 5 else ''} claimed by {s.author} (#{s.id}, active {age} ago: "
+        f"\"{_snip(s.content)}\")"
+        for s, hit, age in conflicts
+    ]
+    reason = (
+        f"[huddlehut] This would {verb} files another agent is working on:\n" + "\n".join(lines) +
+        "\nLikely their unfinished work. Commit only your own files (git commit <paths>) or ask on the "
+        "board first. Run the same command again to proceed anyway."
+    )
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
 
 
 def session_start(inp: dict, client: str) -> dict | None:
@@ -168,13 +373,42 @@ def stop(inp: dict, client: str) -> dict | None:
     store = _store()
     msgs = store.unread(state["board"], state["me"])
     urgent = _needs_me(store, state["board"], state["me"], msgs)
-    if not urgent:
+    reminded = set(state.get("reminded", []))
+    promises = [m for m in _open_promises(store, state["board"], state["me"]) if m.id not in reminded]
+    if not urgent and not promises:
         return None
-    store.set_cursor(state["board"], state["me"], msgs[-1].id)
-    text = "[huddlehut] unread, needs you before stopping:\n" + _render(store, msgs)
+    parts = []
+    if urgent:
+        store.set_cursor(state["board"], state["me"], msgs[-1].id)
+        parts.append("[huddlehut] unread, needs you before stopping:\n" + _render(store, msgs))
+    if promises:
+        state["reminded"] = sorted(reminded | {m.id for m in promises})
+        save(sid, state)
+        parts.append(
+            "[huddlehut] open promises you made; others may be waiting:\n"
+            + "\n".join(f"#{m.id}: {_snip(m.content, 100)}" for m in promises)
+            + "\nKeep one with post(..., reply_to=<id>), or post an update if it's delayed."
+        )
+    text = "\n".join(parts)
     if client == "codex":
         return {"decision": "block", "reason": text}
     return _context("Stop", text)
+
+
+def session_end(inp: dict, client: str) -> dict | None:
+    sid = inp.get("session_id") or ""
+    state = load(sid)
+    if not state:
+        return None
+    store = _store()
+    store.mark_left(state["board"], state["me"])
+    board = store.get_board(state["board"])
+    promises = _open_promises(store, board.id, state["me"]) if board.status == "open" else []
+    if promises:
+        ids = ", ".join(f"#{m.id} ({_snip(m.content, 50)})" for m in promises[:3])
+        store.post_to(board, state["me"], f"Session ended. Unkept promise: {ids}. Pick it up or re-plan.", "blocker")
+    unlink(sid)
+    return None
 
 
 def wait(inp: dict, client: str) -> int:
@@ -203,7 +437,8 @@ def wait(inp: dict, client: str) -> int:
     return 0
 
 
-EVENTS = {"post-tool": post_tool, "session-start": session_start, "stop": stop}
+EVENTS = {"post-tool": post_tool, "pre-tool": pre_tool, "session-start": session_start, "stop": stop,
+          "session-end": session_end}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,17 +1,67 @@
 {
-  "description": "Deliver huddlehut messages without tool calls, re-inject the board after compaction, and wake the agent when a reply arrives.",
+  "description": "Deliver huddlehut messages without tool calls, guard commits of other agents' claimed files, post commits, re-inject the board after compaction, flag unkept promises at session end, and wake the agent when a reply arrives.",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook pre-tool --client claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook post-tool --client claude", "timeout": 15 } ] }
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook post-tool --client claude",
+            "timeout": 15
+          }
+        ]
+      }
     ],
     "SessionStart": [
-      { "matcher": "compact|resume", "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook session-start --client claude", "timeout": 15 } ] }
+      {
+        "matcher": "compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook session-start --client claude",
+            "timeout": 15
+          }
+        ]
+      }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook stop --client claude", "timeout": 15 },
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook wait --client claude", "async": true, "asyncRewake": true, "timeout": 1900 }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook stop --client claude",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook wait --client claude",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 1900
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook session-end --client claude",
+            "timeout": 5
+          }
         ]
       }
     ]

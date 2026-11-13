@@ -12,7 +12,9 @@ def test_codex_hooks_merge_keeps_user_hooks_and_is_idempotent():
     assert once == twice                                                    # re-install doesn't duplicate
     stop_cmds = [h["command"] for g in twice["hooks"]["Stop"] for h in g["hooks"]]
     assert "python3 my_stop.py" in stop_cmds and any("stop --client codex" in c for c in stop_cmds)
-    assert set(twice["hooks"]) == {"PostToolUse", "SessionStart", "Stop"}
+    assert set(twice["hooks"]) == {"PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd"}
+    assert twice["hooks"]["PreToolUse"][-1]["matcher"] == "Bash"
+    assert twice["hooks"]["SessionEnd"][-1]["hooks"][0]["timeout"] == 3
 
 
 def test_config_file_selects_backend_and_is_private(tmp_path, monkeypatch):
