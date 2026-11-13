@@ -22,16 +22,18 @@ import time
 from mcp.server.mcpserver import MCPServer
 
 from .compact import join_board as _join
-from .claims import overlaps
-from .compact import render_entries
+from .claims import normalize
+from .compact import render_entries, render_files
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills
 from .store import BoardError, Store
 
 INSTRUCTIONS = """Boards: agents in separate sessions (Claude Code, Codex) share one project.
 Task start: search_memories. Have key: join_board. Else create_board, give user key.
-Post while working: status (doing + files you own; replaces your old one; overlaps get flagged), decision (+why), question, \
-answer (reply_to), blocker, promise (what you owe others, e.g. "post when X rebuilt"; keep it by replying to it), result, \
-deadend (what failed + why). Commits are posted for you.
+Post while working: status (what you're doing; replaces your old one), decision (+why), question, answer (reply_to), \
+blocker, promise (what you owe others, e.g. "post when X rebuilt"; keep it by replying to it), result, deadend (what \
+failed + why). Commits are posted for you.
+Files: never list them in posts. Editing a file claims it for you; files(claim=[...]) for ones you're about to touch, \
+files(release=["*"]) when done. Committed files release themselves.
 Write caveman: no articles, filler, pleasantries. Keep paths, negations, why. No made-up abbreviations. 1-3 lines.
 Report outcomes, not metrics: "tests pass", not "474 pass, ruff+mypy clean". Numbers only when something fails.
 Others' new msgs arrive in post results. read_messages(wait_seconds) only when blocked on reply.
@@ -42,13 +44,6 @@ store = Store()
 # One server process per client session; the suffix tells two sessions of the same tool apart.
 AUTHOR = DEFAULT_AGENT if os.environ.get("HUDDLEHUT_EXACT_NAME") else f"{DEFAULT_AGENT}-{secrets.token_hex(2)}"
 tool = mcp.tool(structured_output=False)  # plain text only: no output schema, no duplicate JSON result
-
-
-def _overlap_note(m) -> str:
-    if m.kind != "status":
-        return ""
-    found = overlaps(m, store.current_statuses(m.board_id))
-    return "\nOverlap: " + "; ".join(found) + ". Coordinate before editing." if found else ""
 
 
 class Session:
@@ -112,14 +107,12 @@ async def join_board(key: str, status: str = "") -> str:
     """Join by key. Returns who does what, open questions, decision log. status: what you'll do."""
     try:
         S.use(key)
-        note = ""
         if status:
-            m = store.post(key, AUTHOR, status, kind="status")
-            note = _overlap_note(m)
+            store.post(key, AUTHOR, status, kind="status")
         text, last_id = await asyncio.to_thread(_join, store.url, key)
         board = store.board_for_key(key)
         store.set_cursor(board.id, AUTHOR, last_id)
-        return f"{_marker(board.id)}\n{text}{note}"
+        return f"{_marker(board.id)}\n{text}"
     except BoardError as e:
         return f"error: {e}"
 
@@ -133,7 +126,24 @@ def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "") -> 
         new, _, _ = S.inbox(k)
     except BoardError as e:
         return f"error: {e}"
-    return f"ok #{m.id}" + _overlap_note(m) + ("\nNew:\n" + render_entries(store, new) if new else "")
+    return f"ok #{m.id}" + ("\nNew:\n" + render_entries(store, new) if new else "")
+
+
+@tool
+def files(claim: list[str] | None = None, release: list[str] | None = None, key: str = "") -> str:
+    """Shared file inventory. claim: files/globs you're starting on; release: ones you're done with ("*" = all). Returns who holds what."""
+    try:
+        board = store.board_for_key(S.use(key))
+        top = (store.presence(board.id).get(AUTHOR) or {}).get("toplevel")
+        lines = []
+        if release:
+            store.release(board.id, AUTHOR, ["*"] if "*" in release else [normalize(p, top) for p in release])
+        if claim:
+            for path, c in store.claim(board.id, AUTHOR, [normalize(p, top) for p in claim], top):
+                lines.append(f"not claimed: {path} held by {c['agent']}. Ask them on the board first.")
+    except BoardError as e:
+        return f"error: {e}"
+    return "\n".join(lines + [render_files(store, board.id) or "(no files claimed)"])
 
 
 @tool

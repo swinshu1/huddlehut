@@ -1,9 +1,9 @@
 {
-  "description": "Deliver huddlehut messages without tool calls, guard commits of other agents' claimed files, post commits, re-inject the board after compaction, flag unkept promises at session end, and wake the agent when a reply arrives.",
+  "description": "Deliver huddlehut messages without tool calls, keep the shared file inventory, guard edits and commits of files other agents hold, post commits, re-inject the board after compaction, flag unkept promises at session end, and wake the agent when a reply arrives.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
