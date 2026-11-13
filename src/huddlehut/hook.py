@@ -358,13 +358,19 @@ def pre_tool(inp: dict, client: str) -> dict | None:
     files = _changed_files(gdir, staged_only)
     if not files:
         return None
-    digest = hashlib.sha1(command.encode()).hexdigest()[:12]
-    if digest in state.get("guard_passed", []):
-        return None  # second attempt: the agent has seen the warning and chose to proceed
     store = _store()
     conflicts = store.conflicts(state["board"], state["me"], sorted(files), toplevel)
     if not conflicts:
         return None
+    locked = [(p, c) for p, c in conflicts if c.get("locked")]
+    if locked:  # a lock is a hard stop until its holder unlocks, leaves, or goes idle
+        return _deny(
+            f"[huddlehut] This would {verb} locked files:\n" + "\n".join(_holders(store, state["board"], locked))
+            + "\nAsk them to unlock (files(unlock=[...])), or leave those files out (git commit <paths>)."
+        )
+    digest = hashlib.sha1(command.encode()).hexdigest()[:12]
+    if digest in state.get("guard_passed", []):
+        return None  # second attempt: the agent has seen the warning and chose to proceed
     state.setdefault("guard_passed", []).append(digest)
     save(sid, state)
     return _deny(
@@ -388,19 +394,26 @@ def _guard_edit(inp: dict, tool: str, tool_input: dict) -> dict | None:
     cwd = inp.get("cwd")
     top = _git_info(state, cwd).get("toplevel")
     mine, passed = set(state.get("mine", [])), set(state.get("guard_passed", []))
-    todo = [p for p in dict.fromkeys(normalize(x, top, cwd) for x in paths) if p not in mine and f"edit:{p}" not in passed]
+    todo = [p for p in dict.fromkeys(normalize(x, top, cwd) for x in paths) if p not in mine]
     if not todo:
         save(sid, state)
-        return None  # own files (no database needed), or already warned
+        return None  # own files: no database needed
     store = _store()
     conflicts = store.conflicts(state["board"], state["me"], todo, top)
-    if conflicts:
-        state["guard_passed"] = sorted(passed | {f"edit:{p}" for p, _ in conflicts})
+    locked = [(p, c) for p, c in conflicts if c.get("locked")]
+    soft = [(p, c) for p, c in conflicts if not c.get("locked") and f"edit:{p}" not in passed]
+    if soft:
+        state["guard_passed"] = sorted(passed | {f"edit:{p}" for p, _ in soft})
     save(sid, state)
-    if not conflicts:
+    if locked:  # hard stop until the holder unlocks, leaves, or goes idle
+        return _deny(
+            "[huddlehut] Locked: " + "; ".join(_holders(store, state["board"], locked))
+            + ". Ask them to unlock on the board, or pick other work."
+        )
+    if not soft:
         return None
     return _deny(
-        "[huddlehut] " + "; ".join(_holders(store, state["board"], conflicts))
+        "[huddlehut] " + "; ".join(_holders(store, state["board"], soft))
         + ". They're probably mid-edit. Ask on the board or pick other work. Edit again to proceed anyway."
     )
 

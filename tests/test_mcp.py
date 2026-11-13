@@ -42,7 +42,9 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
 
             joined = await _call(codex, "join_board", key=key, status="tests in tests/parser")
             assert "goal: new parser" in joined
-            assert re.search(r"Now:\n#1 claude-code-\w{4}: parser; own src/parser/\*\n#3 codex-\w{4}: tests", joined)
+            # "own src/parser/*" went into the inventory and out of the status text
+            assert re.search(r"Now:\n#1 claude-code-\w{4}: parser\n#3 codex-\w{4}: tests in tests/parser", joined)
+            assert re.search(r"Files:\nclaude-code-\w{4}: src/parser/\*", joined)
             assert re.search(r"Open:\n#2 claude-code-\w{4}/question: spans on AST nodes\?", joined)
             assert joined.endswith("last_id=3")
 
@@ -70,6 +72,10 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
             assert "src/parser/*" in (await _call(codex, "join_board", key=key))       # inventory in the view
             done = await _call(claude, "files", release=["*"])
             assert "claude-code" not in done
+            locked = await _call(claude, "files", lock=["src/schema.py"])
+            assert re.search(r"claude-code-\w{4}: src/schema\.py \(locked\)", locked)
+            assert "not locked: src/schema.py held by" in await _call(codex, "files", lock=["src/schema.py"])
+            assert "(locked)" not in await _call(claude, "files", unlock=["*"])
 
             second = await _call(claude, "create_board", name="docs", project="repo-x")
             assert "Other open boards repo-x: parser rewrite" in second

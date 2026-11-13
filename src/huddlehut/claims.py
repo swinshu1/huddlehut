@@ -43,3 +43,72 @@ overlap = _overlap
 def patch_paths(patch: str) -> list[str]:
     """Files touched by a Codex apply_patch payload."""
     return re.findall(r"^\*\*\* (?:Update File|Add File|Delete File|Move to): (.+?)\s*$", patch, re.M)
+
+
+# ---- file names in posts ----------------------------------------------------
+# The inventory already says who works on what, so posts shouldn't restate file names.
+
+_EXT = (r"(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|go|rs|java|kt|rb|php|cs|c|h|cc|cpp|hpp|swift|md|mdx|json|toml|ya?ml|"
+        r"sql|sh|css|scss|html|vue|svelte|tf|proto|txt|cfg|ini|lock|env|csv)")
+_PATH_RE = rf"(?:[\w.-]+/)+(?:[\w.*-]*[\w*])?|[\w-]+\.{_EXT}"  # never ends in "." or ","
+_PATH = re.compile(rf"(?<![\w/.:@-])({_PATH_RE})(?![\w/])")
+_NOT_PATHS = {"and/or", "n/a", "i/o", "w/o", "yes/no", "read/write", "client/server", "on/off", "input/output"}
+_LIST = r"\x00(?:\s*(?:,|;|&|\+|and)\s*\x00)*"
+_LEAD = (r"(?:files?\s+(?:changed|touched|modified|edited)|changed|touched|modified|edited|updated|"
+         r"own(?:s|ing)?|claim(?:s|ed|ing)?|editing|touching|working\s+on|in|on|to|for|of|at|via)")
+_FILE_LIST = re.compile(
+    rf"\b(?:files?\s+)?(?:changed|touched|modified|edited|updated)\s*:\s*(?:{_PATH_RE})(?:\s*(?:,|;|&|and)\s*(?:{_PATH_RE}))*",
+    re.I,
+)
+
+
+def _is_path(p: str) -> bool:
+    return p.lower() not in _NOT_PATHS and not p.startswith(("http", "www.")) and bool(re.search(r"[A-Za-z]", p))
+
+
+def mentioned_paths(text: str) -> list[str]:
+    """File paths and globs named in a post, e.g. 'own src/parser/*, tests/test_lexer.py'."""
+    return list(dict.fromkeys(m.group(1).rstrip(".,;:") for m in _PATH.finditer(text) if _is_path(m.group(1))))
+
+
+_OWNED = re.compile(
+    rf"\b(?:i\s+)?(?:own(?:s|ing)?|claim(?:s|ing)?|my\s+files?:?|mine:)\s+((?:{_PATH_RE})(?:\s*(?:,|;|&|and)\s*(?:{_PATH_RE}))*)",
+    re.I,
+)
+
+
+def owned_paths(text: str) -> list[str]:
+    """Paths the author says are theirs: 'own src/parser/*, tests/x.py', 'claiming a.py'.
+    Other mentions ('codex take src/ui') are not ownership and are left alone."""
+    out = []
+    for m in _OWNED.finditer(text):
+        out += [p for p in mentioned_paths(m.group(1)) if p not in out]
+    return out
+
+
+def _tidy_gaps(t: str) -> str:
+    t = re.sub(r"\(\s*[,;]?\s*\)", "", t)
+    t = re.sub(r"\s+([,.;:!?)])", r"\1", t)
+    t = re.sub(r"([,;:])(?:\s*[,;:])+", r"\1", t)
+    t = re.sub(r"[,;:]\s*(?=[.!?]|$)", "", t)
+    t = re.sub(r"(^|[.!?]\s+)[,;:]\s*", r"\1", t)
+    t = re.sub(r"\.(?:\s*\.)+", ".", t)
+    return re.sub(r"\s{2,}", " ", t).strip(" ,;:")
+
+
+def strip_paths(text: str, drop) -> str:
+    """Remove the paths for which drop(path) is true, with the words that only introduced them
+    ('in', 'own', 'changed:') and any parentheses left empty."""
+    t = _PATH.sub(lambda m: "\x00" if _is_path(m.group(1)) and drop(m.group(1).rstrip(".,;:")) else m.group(0), text)
+    if "\x00" not in t:
+        return text
+    t = re.sub(rf"\(\s*{_LIST}\s*\)", "", t)
+    t = re.sub(rf"\b{_LEAD}\s*:?\s*{_LIST}", "", t, flags=re.I)
+    t = re.sub(_LIST, "", t)
+    return _tidy_gaps(t)
+
+
+def strip_file_lists(text: str) -> str:
+    """Drop 'changed: a.py, b.py'-style lists from any post."""
+    t = _FILE_LIST.sub("", text)
+    return text if t == text else _tidy_gaps(t)

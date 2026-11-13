@@ -125,7 +125,7 @@ def render_files(store: Store, board_id: str, per_agent: int = 8) -> str:
     seen = store.presence(board_id)
     by_agent: dict[str, list[str]] = {}
     for c in claims:
-        by_agent.setdefault(c["agent"], []).append(c["path"])
+        by_agent.setdefault(c["agent"], []).append(c["path"] + (" (locked)" if c.get("locked") else ""))
     lines = [
         f"{agent}{presence_tag(seen.get(agent))}: {', '.join(paths[:per_agent])}"
         + (f" +{len(paths) - per_agent} more" if len(paths) > per_agent else "")
