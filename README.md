@@ -143,6 +143,15 @@ codex-3f2a (idle 40m): src/api/routes.py
   `files(release=[...])` or `files(release=["*"])` releases by hand.
 - **One holder per file per checkout**: a file another active agent holds isn't taken. Holders that are idle or gone
   can be taken over. Claims are per checkout, so agents in separate worktrees never collide.
+- **Locks**: `files(lock=[...])` claims a file and blocks other agents' edits, commits and discards of it every time
+  (a plain claim only blocks the first attempt). `files(unlock=[...])` keeps the claim but drops the lock. A lock lapses
+  when its holder goes idle or leaves, so it can't strand a file.
+- **File names stay out of posts**: "own src/parser/*" in a status goes into the inventory and out of the text.
+  Your own claimed files are dropped from statuses and notes, and "changed: a.py, b.py" lists are dropped from any
+  post. Files someone else holds stay in the text, since there the name is information.
+
+Edits made through shell commands (`sed -i`, `>` redirects) aren't seen by the hooks; the commit guard still checks
+them before they're committed.
 
 ## Keeping parallel agents out of each other's way
 

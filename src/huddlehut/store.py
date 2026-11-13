@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS presence (
 );
 CREATE TABLE IF NOT EXISTS claims (
     board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
-    since REAL NOT NULL, PRIMARY KEY (board_id, toplevel, path)
+    since REAL NOT NULL, locked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (board_id, toplevel, path)
 );
 CREATE TABLE IF NOT EXISTS memories (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,7 +154,8 @@ POSTGRES_SCHEMA = [
         PRIMARY KEY (board_id, agent))""",
     """CREATE TABLE IF NOT EXISTS claims (
         board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
-        since DOUBLE PRECISION NOT NULL, PRIMARY KEY (board_id, toplevel, path))""",
+        since DOUBLE PRECISION NOT NULL, locked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (board_id, toplevel, path))""",
+    "ALTER TABLE claims ADD COLUMN IF NOT EXISTS locked INTEGER NOT NULL DEFAULT 0",
     """CREATE TABLE IF NOT EXISTS memories (
         id BIGSERIAL PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), project TEXT NOT NULL,
         title TEXT NOT NULL, technique TEXT NOT NULL, when_to_apply TEXT NOT NULL,
@@ -205,6 +206,7 @@ class _Sqlite:
             ("boards", "compact_lock", "compact_lock REAL"),
             ("boards", "compact_error", "compact_error TEXT"),
             ("messages", "reply_to", "reply_to INTEGER"),
+            ("claims", "locked", "locked INTEGER NOT NULL DEFAULT 0"),
         ):
             have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in have:
@@ -477,6 +479,7 @@ class Store:
         from .tidy import tidy
 
         content = tidy(content)  # "474 pass, ruff+mypy clean" -> "tests pass"
+        content, conflicts = self._quiet_files(board, author, kind, content)
         if len(content) > MAX_POST_CHARS:
             raise BoardError(
                 f"{len(content)} chars, max {MAX_POST_CHARS}. Every agent rereads posts: "
@@ -491,7 +494,32 @@ class Store:
             " VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
             (board.id, author, kind, content.strip(), time.time(), reply_to or None),
         )
-        return self.get_message(row["id"])
+        m = self.get_message(row["id"])
+        m.conflicts = conflicts  # files named in a status that someone else holds
+        return m
+
+    def _quiet_files(self, board: Board, author: str, kind: str, content: str) -> tuple[str, list]:
+        """Keep file names out of posts; the inventory already shows who works on what.
+        - any post: 'changed: a.py, b.py' lists are dropped
+        - status: files it says it owns ("own src/parser/*") are claimed into the inventory
+        - status and note: the author's own claimed files are dropped
+        Files someone else holds stay in the text, since there the name is information."""
+        from .claims import normalize, overlap, owned_paths, strip_file_lists, strip_paths
+
+        text = strip_file_lists(content)
+        conflicts: list = []
+        if kind in ("status", "note"):
+            top = (self.presence(board.id).get(author) or {}).get("toplevel")
+            if kind == "status":
+                named = list(dict.fromkeys(normalize(p, top) for p in owned_paths(text)))
+                if named:
+                    conflicts = self.claim(board.id, author, named, top)
+            own = [c["path"] for c in self.claims(board.id) if c["agent"] == author]
+            if own:
+                text = strip_paths(text, lambda p: any(overlap(normalize(p, top), o) for o in own))
+        if len(text.strip(" .,;:")) < 3:
+            text = "working"  # the whole post was file names
+        return text, conflicts
 
     def get_message(self, message_id: int) -> Message:
         return _message(self._one("SELECT * FROM messages WHERE id=?", (message_id,)))
@@ -633,21 +661,34 @@ class Store:
             out += [(p, c) for p in paths if _overlap(p, c["path"])]
         return out
 
-    def claim(self, board_id: str, agent: str, paths, toplevel: str | None = None) -> list[tuple[str, dict]]:
+    def claim(self, board_id: str, agent: str, paths, toplevel: str | None = None,
+              lock: bool = False) -> list[tuple[str, dict]]:
         """Claim paths (files or globs) in a checkout. Paths another active agent holds there are not
-        taken; those are returned as conflicts. Claims of idle or departed agents are taken over."""
+        taken; those are returned as conflicts. Claims of idle or departed agents are taken over.
+        lock=True also blocks other agents' edits of these paths until unlocked or released."""
         conflicts = self.conflicts(board_id, agent, paths, toplevel)
         held = {p for p, _ in conflicts}
         now = time.time()
         for p in paths:
             if p not in held:
                 self.db.execute(
-                    "INSERT INTO claims (board_id, toplevel, path, agent, since) VALUES (?, ?, ?, ?, ?)"
-                    " ON CONFLICT (board_id, toplevel, path) DO UPDATE SET agent = excluded.agent,"
-                    " since = excluded.since",
-                    (board_id, toplevel or "", p, agent, now),
+                    "INSERT INTO claims (board_id, toplevel, path, agent, since, locked) VALUES (?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT (board_id, toplevel, path) DO UPDATE SET"
+                    " locked = CASE WHEN excluded.locked = 1 THEN 1"
+                    " WHEN claims.agent = excluded.agent THEN claims.locked ELSE 0 END,"
+                    " agent = excluded.agent, since = excluded.since",
+                    (board_id, toplevel or "", p, agent, now, 1 if lock else 0),
                 )
         return conflicts
+
+    def unlock(self, board_id: str, agent: str, paths=("*",)) -> int:
+        """Drop the lock but keep the claim; "*" unlocks all of this agent's files."""
+        if "*" in paths:
+            return self.db.execute("UPDATE claims SET locked=0 WHERE board_id=? AND agent=?", (board_id, agent)).rowcount
+        q = ",".join("?" * len(paths))
+        return self.db.execute(
+            f"UPDATE claims SET locked=0 WHERE board_id=? AND agent=? AND path IN ({q})", (board_id, agent, *paths)
+        ).rowcount
 
     def release(self, board_id: str, agent: str, paths=("*",)) -> int:
         """Release this agent's claims; "*" releases all of them."""

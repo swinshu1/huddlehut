@@ -32,7 +32,8 @@ Task start: search_memories. Have key: join_board. Else create_board, give user 
 Post while working: status (what you're doing; replaces your old one), decision (+why), question, answer (reply_to), \
 blocker, promise (what you owe others, e.g. "post when X rebuilt"; keep it by replying to it), result, deadend (what \
 failed + why). Commits are posted for you.
-Files: never list them in posts. Editing a file claims it for you; files(claim=[...]) for ones you're about to touch, \
+Files: don't name files you're working on; the inventory shows them (your own get stripped from status/notes). \
+Editing claims a file for you; files(claim=[...]) before touching more, files(lock=[...]) to block others' edits, \
 files(release=["*"]) when done. Committed files release themselves.
 Write caveman: no articles, filler, pleasantries. Keep paths, negations, why. No made-up abbreviations. 1-3 lines.
 Report outcomes, not metrics: "tests pass", not "474 pass, ruff+mypy clean". Numbers only when something fails.
@@ -81,6 +82,12 @@ class Session:
         return new, cursor, board.status
 
 
+def _held_note(m) -> str:
+    """A status claimed files someone else holds: say so instead of silently not claiming them."""
+    held = getattr(m, "conflicts", None) or []
+    return "".join(f"\nnot claimed: {p} held by {c['agent']}. Ask them first." for p, c in held)
+
+
 def _marker(board_id: str) -> str:
     """First line of create/join results; hooks read it to link the client session to the board."""
     return f"[{board_id} you={AUTHOR}]"
@@ -107,12 +114,13 @@ async def join_board(key: str, status: str = "") -> str:
     """Join by key. Returns who does what, open questions, decision log. status: what you'll do."""
     try:
         S.use(key)
+        note = ""
         if status:
-            store.post(key, AUTHOR, status, kind="status")
+            note = _held_note(store.post(key, AUTHOR, status, kind="status"))
         text, last_id = await asyncio.to_thread(_join, store.url, key)
         board = store.board_for_key(key)
         store.set_cursor(board.id, AUTHOR, last_id)
-        return f"{_marker(board.id)}\n{text}"
+        return f"{_marker(board.id)}\n{text}{note}"
     except BoardError as e:
         return f"error: {e}"
 
@@ -126,21 +134,28 @@ def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "") -> 
         new, _, _ = S.inbox(k)
     except BoardError as e:
         return f"error: {e}"
-    return f"ok #{m.id}" + ("\nNew:\n" + render_entries(store, new) if new else "")
+    return f"ok #{m.id}" + _held_note(m) + ("\nNew:\n" + render_entries(store, new) if new else "")
 
 
 @tool
-def files(claim: list[str] | None = None, release: list[str] | None = None, key: str = "") -> str:
-    """Shared file inventory. claim: files/globs you're starting on; release: ones you're done with ("*" = all). Returns who holds what."""
+def files(claim: list[str] | None = None, lock: list[str] | None = None, unlock: list[str] | None = None,
+          release: list[str] | None = None, key: str = "") -> str:
+    """Shared file inventory. claim: files/globs you're starting on. lock: claim + block others' edits (lapses if you go idle or leave). unlock: keep claim, drop lock. release: done ("*" = all). Returns who holds what."""
     try:
         board = store.board_for_key(S.use(key))
         top = (store.presence(board.id).get(AUTHOR) or {}).get("toplevel")
+
+        def norm(paths):
+            return ["*"] if "*" in paths else [normalize(p, top) for p in paths]
+
         lines = []
+        if unlock:
+            store.unlock(board.id, AUTHOR, norm(unlock))
         if release:
-            store.release(board.id, AUTHOR, ["*"] if "*" in release else [normalize(p, top) for p in release])
-        if claim:
-            for path, c in store.claim(board.id, AUTHOR, [normalize(p, top) for p in claim], top):
-                lines.append(f"not claimed: {path} held by {c['agent']}. Ask them on the board first.")
+            store.release(board.id, AUTHOR, norm(release))
+        for paths, locking in ((claim, False), (lock, True)):
+            for path, c in store.claim(board.id, AUTHOR, norm(paths), top, lock=locking) if paths else []:
+                lines.append(f"not {'locked' if locking else 'claimed'}: {path} held by {c['agent']}. Ask them first.")
     except BoardError as e:
         return f"error: {e}"
     return "\n".join(lines + [render_files(store, board.id) or "(no files claimed)"])
