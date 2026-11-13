@@ -466,6 +466,9 @@ class Store:
             kind = "note"
         if not content.strip():
             raise BoardError("empty message")
+        from .tidy import tidy
+
+        content = tidy(content)  # "474 pass, ruff+mypy clean" -> "tests pass"
         if len(content) > MAX_POST_CHARS:
             raise BoardError(
                 f"{len(content)} chars, max {MAX_POST_CHARS}. Every agent rereads posts: "
