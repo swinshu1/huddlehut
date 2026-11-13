@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="6 16 52 36" width="156" height="108" role="img" aria-label="huddle hut logo">
+  <path d="M10 36 A24 24 0 0 1 54 36" fill="none" stroke="#1d1d1f" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="23" cy="43" r="5.5" fill="#AFA9EC"/>
+  <circle cx="32" cy="41" r="5.5" fill="#5DCAA5"/>
+  <circle cx="41" cy="43" r="5.5" fill="#ED93B1"/>
+</svg>
