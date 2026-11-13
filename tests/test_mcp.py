@@ -28,7 +28,7 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
             await claude.initialize()
             await codex.initialize()
             tools = {t.name for t in (await codex.list_tools()).tools}
-            assert tools == {"create_board", "join_board", "post", "read_messages",
+            assert tools == {"create_board", "join_board", "post", "read_messages", "files",
                              "close_board", "reopen_board", "search_memories"}
 
             # no board yet -> helpful error, no crash
@@ -62,8 +62,14 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
                 waited = await _call(claude, "read_messages", wait_seconds=10)
             assert "tests ready" in waited and "Pratt" not in waited
 
-            clash = await _call(codex, "post", content="also fixing src/parser/lexer.py", kind="status")
-            assert re.search(r"Overlap: claude-code-\w{4} \(#1\) has src/parser\. Coordinate", clash)
+            inv = await _call(claude, "files", claim=["src/parser/"])
+            assert re.fullmatch(r"Files:\nclaude-code-\w{4}: src/parser/\*", inv)
+            clash = await _call(codex, "files", claim=["src/parser/lexer.py", "tests/parser/test_lexer.py"])
+            assert re.search(r"not claimed: src/parser/lexer\.py held by claude-code-\w{4}", clash)
+            assert re.search(r"codex-\w{4}: tests/parser/test_lexer\.py", clash)
+            assert "src/parser/*" in (await _call(codex, "join_board", key=key))       # inventory in the view
+            done = await _call(claude, "files", release=["*"])
+            assert "claude-code" not in done
 
             second = await _call(claude, "create_board", name="docs", project="repo-x")
             assert "Other open boards repo-x: parser rewrite" in second

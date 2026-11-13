@@ -144,9 +144,11 @@ def test_shared_checkout_warned_once(env, repo, monkeypatch, capsys):
 # ---- commit guard -----------------------------------------------------------
 
 
-def claim(store, board, key, repo, agent=OTHER, paths="src/api.py"):
-    store.post(key, agent, f"rebuilding routes; own {paths}", "status")
-    store.touch(board.id, agent, str(repo), git(repo, "rev-parse", "--show-toplevel"), "main")
+def claim(store, board, key, repo, agent=OTHER, paths=("src/api.py",)):
+    top = git(repo, "rev-parse", "--show-toplevel")
+    store.post(key, agent, "rebuilding routes", "status")
+    store.touch(board.id, agent, str(repo), top, "main")
+    store.claim(board.id, agent, list(paths), top)
 
 
 def test_guard_blocks_first_commit_of_claimed_files_then_lets_it_through(env, repo, monkeypatch, capsys):
@@ -158,7 +160,7 @@ def test_guard_blocks_first_commit_of_claimed_files_then_lets_it_through(env, re
     out = run("pre-tool", bash(cmd, repo), monkeypatch, capsys)
     dec = out["hookSpecificOutput"]
     assert dec["hookEventName"] == "PreToolUse" and dec["permissionDecision"] == "deny"
-    assert "src/api.py claimed by codex-bbbb" in dec["permissionDecisionReason"]
+    assert "src/api.py held by codex-bbbb" in dec["permissionDecisionReason"]
     assert run("pre-tool", bash(cmd, repo), monkeypatch, capsys) is None     # same command again: proceeds
 
 
@@ -171,7 +173,8 @@ def test_guard_ignores_own_files_and_other_worktrees(env, repo, tmp_path, monkey
     assert run("pre-tool", bash("git commit -m ui", repo), monkeypatch, capsys) is None
 
     (repo / "src" / "api.py").write_text("x = 9\n")
-    store.touch(board.id, OTHER, str(tmp_path / "wt"), str(tmp_path / "wt"), "other")  # it moved to a worktree
+    store.release(board.id, OTHER)                                  # it moved to its own worktree
+    store.claim(board.id, OTHER, ["src/api.py"], str(tmp_path / "wt"))
     assert run("pre-tool", bash("git commit -am all", repo), monkeypatch, capsys) is None
 
 

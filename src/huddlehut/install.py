@@ -44,7 +44,7 @@ def codex_hooks_config(existing: dict) -> dict:
     cfg = dict(existing or {})
     hooks = cfg.setdefault("hooks", {})
     ours = {
-        "PreToolUse": ("Bash", [{"type": "command", "command": f'"{HOOK}" pre-tool --client codex', "timeout": 10}]),
+        "PreToolUse": ("Bash|apply_patch", [{"type": "command", "command": f'"{HOOK}" pre-tool --client codex', "timeout": 10}]),
         "PostToolUse": (None, [{"type": "command", "command": f'"{HOOK}" post-tool --client codex', "timeout": 15}]),
         "SessionStart": (None, [{"type": "command", "command": f'"{HOOK}" session-start --client codex', "timeout": 15}]),
         "Stop": (None, [{"type": "command", "command": f'"{HOOK}" stop --client codex', "timeout": 15}]),

@@ -1,24 +1,29 @@
-from huddlehut.claims import claimed_paths, overlaps
-from huddlehut.store import Message
+import pytest
+
+from huddlehut.claims import normalize, overlap, patch_paths
 
 
-def msg(i, author, content):
-    return Message(id=i, board_id="b", author=author, kind="status", content=content, created_at=0)
+@pytest.mark.parametrize("a,b,hit", [
+    ("src/api.py", "src/api.py", True),
+    ("src/parser/lexer.py", "src/parser/*", True),
+    ("src/parser/*", "src/parser/deep/x.py", True),
+    ("lexer.py", "src/parser/lexer.py", True),
+    ("src/api.py", "src/ui.py", False),
+    ("src/api", "src/api_v2.py", False),
+    ("tests/test_*.py", "tests/test_api.py", True),
+])
+def test_overlap(a, b, hit):
+    assert overlap(a, b) is hit
 
 
-def test_claimed_paths():
-    assert claimed_paths("Pratt parser. Own src/parser/*, tests/test_lexer.py") == {"src/parser", "tests/test_lexer.py"}
-    assert claimed_paths("refactor lexer.py and/or ast. see https://x.dev/a/b. 1/3 done") == {"lexer.py"}
-    assert claimed_paths("thinking about approach") == set()
+def test_normalize():
+    assert normalize("/repo/src/a.py", "/repo") == "src/a.py"
+    assert normalize("./src/a.py") == "src/a.py"
+    assert normalize("a.py", "/repo", cwd="/repo/src") == "src/a.py"
+    assert normalize("src/parser/") == "src/parser/*"
+    assert normalize("/elsewhere/x.py", "/repo") == "/elsewhere/x.py"
 
 
-def test_overlaps_flag_other_agents_only():
-    others = [
-        msg(1, "codex-1", "tests. own tests/parser/**"),
-        msg(2, "claude-2", "api. own src/api/routes.py"),
-        msg(3, "me", "old status src/parser/x.py"),
-    ]
-    mine = msg(9, "me", "parser work: src/parser/*, tests/parser/test_ast.py")
-    assert overlaps(mine, others) == ["codex-1 (#1) has tests/parser"]
-    assert overlaps(msg(9, "me", "edit routes.py"), others) == ["claude-2 (#2) has src/api/routes.py"]
-    assert overlaps(msg(9, "me", "docs/ only"), others) == []
+def test_patch_paths():
+    patch = "*** Begin Patch\n*** Update File: src/api.py\n@@\n-x\n+y\n*** Add File: tests/t.py\n+z\n*** End Patch"
+    assert patch_paths(patch) == ["src/api.py", "tests/t.py"]

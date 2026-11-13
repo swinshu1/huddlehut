@@ -39,6 +39,7 @@ SESSIONS = HOME / "sessions"
 MARKER = re.compile(r"\[(b_[0-9a-f]{8}) you=([\w.-]+)\]")
 BOARD_TOOL = re.compile(r"^mcp__.*huddlehut.*__")
 RISKY_GIT = re.compile(r"\bgit\b.*\b(commit|stash|reset|checkout|restore|clean)\b")
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}  # Claude Code; Codex edits via apply_patch
 INTERVAL = float(os.environ.get("HUDDLEHUT_HOOK_INTERVAL", "5"))
 WAIT_SECONDS = float(os.environ.get("HUDDLEHUT_WAIT_SECONDS", "1800"))
 WAIT_POLL = float(os.environ.get("HUDDLEHUT_WAIT_POLL", "10"))
@@ -167,6 +168,37 @@ def _risky_git(command: str) -> tuple[str, bool, str | None] | None:
     return None
 
 
+def _edited_paths(tool: str, tool_input: dict) -> list[str]:
+    if tool in EDIT_TOOLS:
+        p = tool_input.get("file_path") or tool_input.get("notebook_path")
+        return [p] if p else []
+    if tool == "apply_patch":
+        from .claims import patch_paths
+
+        return patch_paths(str(tool_input.get("command") or tool_input.get("patch") or tool_input.get("input") or ""))
+    return []
+
+
+def _deny(reason: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
+def _holders(store, board_id: str, conflicts) -> list[str]:
+    """'src/a.py, src/b.py held by codex-3f2a (active 2m ago)' per holding agent."""
+    from .compact import _age
+
+    seen, by_agent = store.presence(board_id), {}
+    for path, c in conflicts:
+        by_agent.setdefault(c["agent"], []).append(path)
+    now = time.time()
+    return [
+        f"{', '.join(paths[:5])}{' …' if len(paths) > 5 else ''} held by {agent}"
+        f" (active {_age(now - (seen.get(agent) or {}).get('seen_at', now))} ago)"
+        for agent, paths in by_agent.items()
+    ]
+
+
 # ---- message selection and rendering ----------------------------------------
 
 
@@ -238,7 +270,15 @@ def post_tool(inp: dict, client: str) -> dict | None:
     state["active"] = now
     command = str((inp.get("tool_input") or {}).get("command", "")) if tool == "Bash" else ""
     committed = "git" in command and "commit" in command
-    if not committed and now - state.get("checked", 0) < INTERVAL:
+    edited = _edited_paths(tool, inp.get("tool_input") or {})
+    fresh = []
+    if edited:
+        from .claims import normalize
+
+        top = _git_info(state, cwd).get("toplevel")
+        mine = set(state.get("mine", []))
+        fresh = [p for p in dict.fromkeys(normalize(e, top, cwd) for e in edited) if p not in mine]
+    if not committed and not fresh and now - state.get("checked", 0) < INTERVAL:
         save(sid, state)
         return None
     state["checked"] = now
@@ -246,12 +286,24 @@ def post_tool(inp: dict, client: str) -> dict | None:
     board = store.get_board(state["board"])
     notes = []
 
+    if fresh and board.status == "open":  # editing a file claims it: the inventory fills itself in
+        top = (state.get("git") or {}).get("toplevel")
+        conflicts = store.claim(board.id, state["me"], fresh, top)
+        held = {p for p, _ in conflicts}
+        state["mine"] = sorted(set(state.get("mine", [])) | (set(fresh) - held))
+        if conflicts:
+            notes += [f"you edited {line}. Tell them on the board." for line in _holders(store, board.id, conflicts)]
+
     if committed and board.status == "open":
         head = _head(cwd)
         if head and head[0] != state.get("last_sha") and head[2] >= now - 300:
             state["last_sha"] = head[0]
             branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "?"
             store.post_to(board, state["me"], f"committed {head[1]} ({branch}): {_snip(head[3], 80)}", "result")
+            done = [f for f in (_git(cwd, "show", "--name-only", "--format=", "HEAD") or "").splitlines() if f]
+            if done:  # committed work is checkpointed: free those files for others
+                store.release(board.id, state["me"], done)
+                state["mine"] = sorted(set(state.get("mine", [])) - set(done))
 
     info = _git_info(state, cwd)
     store.touch(board.id, state["me"], cwd, info.get("toplevel"), info.get("branch"))
@@ -279,10 +331,15 @@ def post_tool(inp: dict, client: str) -> dict | None:
 
 
 def pre_tool(inp: dict, client: str) -> dict | None:
-    """Speed bump before committing or discarding another active agent's claimed files."""
-    if inp.get("tool_name") != "Bash":
+    """Speed bumps: editing a file another active agent holds, or committing/discarding files
+    another active agent holds. The first attempt is blocked with the reason; retrying proceeds."""
+    tool = inp.get("tool_name") or ""
+    tool_input = inp.get("tool_input") or {}
+    if tool in EDIT_TOOLS or tool == "apply_patch":
+        return _guard_edit(inp, tool, tool_input)
+    if tool != "Bash":
         return None
-    command = str((inp.get("tool_input") or {}).get("command", ""))
+    command = str(tool_input.get("command", ""))
     if not RISKY_GIT.search(command):
         return None
     sid = inp.get("session_id") or ""
@@ -304,44 +361,48 @@ def pre_tool(inp: dict, client: str) -> dict | None:
     digest = hashlib.sha1(command.encode()).hexdigest()[:12]
     if digest in state.get("guard_passed", []):
         return None  # second attempt: the agent has seen the warning and chose to proceed
-
-    from .claims import _overlap, claimed_paths
-    from .compact import _age
-    from .store import IDLE_AFTER
-
     store = _store()
-    live = store.live_agents(state["board"], exclude=state["me"])
-    now = time.time()
-    conflicts = []
-    for s in store.current_statuses(state["board"]):
-        if s.author == state["me"]:
-            continue
-        p = live.get(s.author)
-        if not p and now - s.created_at > IDLE_AFTER:
-            continue  # owner gone or idle: its claim is stale
-        if p and p.get("toplevel") and p["toplevel"] != toplevel:
-            continue  # different checkout or worktree: no collision
-        claims = {c[len(toplevel) + 1:] if c.startswith(toplevel + "/") else c for c in claimed_paths(s.content)}
-        hit = sorted(f for f in files if any(_overlap(f, c) for c in claims))
-        if hit:
-            seen = p["seen_at"] if p else s.created_at
-            conflicts.append((s, hit, _age(now - seen)))
+    conflicts = store.conflicts(state["board"], state["me"], sorted(files), toplevel)
     if not conflicts:
         return None
     state.setdefault("guard_passed", []).append(digest)
     save(sid, state)
-    lines = [
-        f"{', '.join(hit[:5])}{' …' if len(hit) > 5 else ''} claimed by {s.author} (#{s.id}, active {age} ago: "
-        f"\"{_snip(s.content)}\")"
-        for s, hit, age in conflicts
-    ]
-    reason = (
-        f"[huddlehut] This would {verb} files another agent is working on:\n" + "\n".join(lines) +
-        "\nLikely their unfinished work. Commit only your own files (git commit <paths>) or ask on the "
+    return _deny(
+        f"[huddlehut] This would {verb} files another agent is working on:\n"
+        + "\n".join(_holders(store, state["board"], conflicts))
+        + "\nLikely their unfinished work. Commit only your own files (git commit <paths>) or ask on the "
         "board first. Run the same command again to proceed anyway."
     )
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                   "permissionDecisionReason": reason}}
+
+
+def _guard_edit(inp: dict, tool: str, tool_input: dict) -> dict | None:
+    sid = inp.get("session_id") or ""
+    state = load(sid)
+    if not state:
+        return None
+    paths = _edited_paths(tool, tool_input)
+    if not paths:
+        return None
+    from .claims import normalize
+
+    cwd = inp.get("cwd")
+    top = _git_info(state, cwd).get("toplevel")
+    mine, passed = set(state.get("mine", [])), set(state.get("guard_passed", []))
+    todo = [p for p in dict.fromkeys(normalize(x, top, cwd) for x in paths) if p not in mine and f"edit:{p}" not in passed]
+    if not todo:
+        save(sid, state)
+        return None  # own files (no database needed), or already warned
+    store = _store()
+    conflicts = store.conflicts(state["board"], state["me"], todo, top)
+    if conflicts:
+        state["guard_passed"] = sorted(passed | {f"edit:{p}" for p, _ in conflicts})
+    save(sid, state)
+    if not conflicts:
+        return None
+    return _deny(
+        "[huddlehut] " + "; ".join(_holders(store, state["board"], conflicts))
+        + ". They're probably mid-edit. Ask on the board or pick other work. Edit again to proceed anyway."
+    )
 
 
 def session_start(inp: dict, client: str) -> dict | None:
@@ -402,6 +463,7 @@ def session_end(inp: dict, client: str) -> dict | None:
         return None
     store = _store()
     store.mark_left(state["board"], state["me"])
+    store.release(state["board"], state["me"], ["*"])  # gone: its files are free
     board = store.get_board(state["board"])
     promises = _open_promises(store, board.id, state["me"]) if board.status == "open" else []
     if promises:

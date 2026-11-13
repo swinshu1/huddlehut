@@ -117,6 +117,23 @@ def presence_tag(p: dict | None, now: float | None = None) -> str:
     return ""
 
 
+def render_files(store: Store, board_id: str, per_agent: int = 8) -> str:
+    """The shared inventory, one line per agent: who is working on which files."""
+    claims = store.claims(board_id)
+    if not claims:
+        return ""
+    seen = store.presence(board_id)
+    by_agent: dict[str, list[str]] = {}
+    for c in claims:
+        by_agent.setdefault(c["agent"], []).append(c["path"])
+    lines = [
+        f"{agent}{presence_tag(seen.get(agent))}: {', '.join(paths[:per_agent])}"
+        + (f" +{len(paths) - per_agent} more" if len(paths) > per_agent else "")
+        for agent, paths in by_agent.items()
+    ]
+    return "Files:\n" + "\n".join(lines)
+
+
 def render_view(store: Store, board: Board) -> tuple[str, int]:
     """The joiner's view and the board's newest message id."""
     statuses = store.current_statuses(board.id)
@@ -135,6 +152,9 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
     if statuses:
         parts.append("Now:\n" + "\n".join(
             f"#{m.id} {m.author}{presence_tag(seen.get(m.author))}: {m.content}" for m in statuses))
+    inventory = render_files(store, board.id)
+    if inventory:
+        parts.append(inventory)
     if open_items:
         lines = render_entries(store, open_items).split("\n")
         # flag open promises whose author is gone: someone else has to pick them up

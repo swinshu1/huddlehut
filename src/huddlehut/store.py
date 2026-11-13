@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS presence (
     state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT,
     PRIMARY KEY (board_id, agent)
 );
+CREATE TABLE IF NOT EXISTS claims (
+    board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
+    since REAL NOT NULL, PRIMARY KEY (board_id, toplevel, path)
+);
 CREATE TABLE IF NOT EXISTS memories (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     board_id      TEXT NOT NULL REFERENCES boards(id),
@@ -148,6 +152,9 @@ POSTGRES_SCHEMA = [
         board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at DOUBLE PRECISION NOT NULL,
         state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT,
         PRIMARY KEY (board_id, agent))""",
+    """CREATE TABLE IF NOT EXISTS claims (
+        board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
+        since DOUBLE PRECISION NOT NULL, PRIMARY KEY (board_id, toplevel, path))""",
     """CREATE TABLE IF NOT EXISTS memories (
         id BIGSERIAL PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), project TEXT NOT NULL,
         title TEXT NOT NULL, technique TEXT NOT NULL, when_to_apply TEXT NOT NULL,
@@ -388,6 +395,7 @@ class Store:
             " WHERE id=? AND status='open'",
             (closed_by, time.time(), outcome.strip(), board.id),
         )
+        self.db.execute("DELETE FROM claims WHERE board_id=?", (board.id,))
         return self.get_board(board.id)
 
     def reopen_board(self, key: str, reopened_by: str) -> Board:
@@ -603,6 +611,52 @@ class Store:
         cutoff = time.time() - IDLE_AFTER
         return {a: p for a, p in self.presence(board_id).items()
                 if p["state"] == "active" and p["seen_at"] >= cutoff and a != exclude}
+
+    # ---- file inventory (who is working on which files) --------------------
+
+    def claims(self, board_id: str) -> list[dict]:
+        return [dict(r) for r in self._all("SELECT * FROM claims WHERE board_id=? ORDER BY agent, path", (board_id,))]
+
+    def conflicts(self, board_id: str, agent: str, paths, toplevel: str | None = None) -> list[tuple[str, dict]]:
+        """(path, other agent's claim) for paths overlapping a claim held by another active agent in
+        the same checkout. Idle or departed agents' claims, and other worktrees, don't count.
+        A claim made without a known checkout ('') counts everywhere."""
+        from .claims import _overlap
+
+        live = self.live_agents(board_id, exclude=agent)
+        out = []
+        for c in self.claims(board_id):
+            if c["agent"] == agent or c["agent"] not in live:
+                continue
+            if toplevel and c["toplevel"] and c["toplevel"] != toplevel:
+                continue
+            out += [(p, c) for p in paths if _overlap(p, c["path"])]
+        return out
+
+    def claim(self, board_id: str, agent: str, paths, toplevel: str | None = None) -> list[tuple[str, dict]]:
+        """Claim paths (files or globs) in a checkout. Paths another active agent holds there are not
+        taken; those are returned as conflicts. Claims of idle or departed agents are taken over."""
+        conflicts = self.conflicts(board_id, agent, paths, toplevel)
+        held = {p for p, _ in conflicts}
+        now = time.time()
+        for p in paths:
+            if p not in held:
+                self.db.execute(
+                    "INSERT INTO claims (board_id, toplevel, path, agent, since) VALUES (?, ?, ?, ?, ?)"
+                    " ON CONFLICT (board_id, toplevel, path) DO UPDATE SET agent = excluded.agent,"
+                    " since = excluded.since",
+                    (board_id, toplevel or "", p, agent, now),
+                )
+        return conflicts
+
+    def release(self, board_id: str, agent: str, paths=("*",)) -> int:
+        """Release this agent's claims; "*" releases all of them."""
+        if "*" in paths:
+            return self.db.execute("DELETE FROM claims WHERE board_id=? AND agent=?", (board_id, agent)).rowcount
+        q = ",".join("?" * len(paths))
+        return self.db.execute(
+            f"DELETE FROM claims WHERE board_id=? AND agent=? AND path IN ({q})", (board_id, agent, *paths)
+        ).rowcount
 
     # ---- memories ---------------------------------------------------------
 

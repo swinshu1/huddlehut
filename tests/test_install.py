@@ -13,7 +13,7 @@ def test_codex_hooks_merge_keeps_user_hooks_and_is_idempotent():
     stop_cmds = [h["command"] for g in twice["hooks"]["Stop"] for h in g["hooks"]]
     assert "python3 my_stop.py" in stop_cmds and any("stop --client codex" in c for c in stop_cmds)
     assert set(twice["hooks"]) == {"PreToolUse", "PostToolUse", "SessionStart", "Stop", "SessionEnd"}
-    assert twice["hooks"]["PreToolUse"][-1]["matcher"] == "Bash"
+    assert twice["hooks"]["PreToolUse"][-1]["matcher"] == "Bash|apply_patch"
     assert twice["hooks"]["SessionEnd"][-1]["hooks"][0]["timeout"] == 3
 
 
