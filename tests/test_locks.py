@@ -34,7 +34,7 @@ def test_view_marks_locked_files(store):
     board, _ = store.create_board("b", "p", ME)
     store.claim(board.id, ME, ["src/a.py"], lock=True)
     store.claim(board.id, ME, ["src/b.py"])
-    assert f"{ME}: src/a.py (locked), src/b.py" in render_view(store, board)[0]
+    assert "aaaa: src/a.py (locked), src/b.py" in render_view(store, board)[0]
 
 
 def _other_holds(store, board, repo, lock):

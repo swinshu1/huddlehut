@@ -80,11 +80,11 @@ def test_view_marks_idle_and_departed_owners(store):
     store.touch(board.id, ME)
     store.mark_left(board.id, OTHER)
     text, _ = render_view(store, board)
-    assert f"{OTHER} (left 0m): rebuilding snapshot" in text
-    assert f"{OTHER} (left 0m)/promise: post when rebuilt" in text
-    assert f"{ME}: tests" in text                                      # active: no tag
+    assert "bbbb (left 0m): rebuilding snapshot" in text
+    assert "bbbb (left 0m)/promise: post when rebuilt" in text
+    assert "aaaa: tests" in text                                      # active: no tag
     store.db.execute("UPDATE presence SET seen_at=? WHERE agent=?", (time.time() - 3600, ME))
-    assert f"{ME} (idle 60m)" in render_view(store, board)[0]
+    assert "aaaa (idle 60m)" in render_view(store, board)[0]
 
 
 def test_stop_reminds_about_own_promise_once(env, repo, monkeypatch, capsys):
@@ -137,7 +137,7 @@ def test_shared_checkout_warned_once(env, repo, monkeypatch, capsys):
     link(board, monkeypatch, capsys, repo)
     out = run("post-tool", bash("ls", repo), monkeypatch, capsys)
     note = out["hookSpecificOutput"]["additionalContext"]
-    assert f"{OTHER} works in the same checkout" in note and "git worktree add" in note
+    assert "bbbb works in the same checkout" in note and "git worktree add" in note
     assert run("post-tool", bash("ls", repo), monkeypatch, capsys) is None
 
 
@@ -160,7 +160,7 @@ def test_guard_blocks_first_commit_of_claimed_files_then_lets_it_through(env, re
     out = run("pre-tool", bash(cmd, repo), monkeypatch, capsys)
     dec = out["hookSpecificOutput"]
     assert dec["hookEventName"] == "PreToolUse" and dec["permissionDecision"] == "deny"
-    assert "src/api.py held by codex-bbbb" in dec["permissionDecisionReason"]
+    assert "src/api.py held by bbbb" in dec["permissionDecisionReason"]
     assert run("pre-tool", bash(cmd, repo), monkeypatch, capsys) is None     # same command again: proceeds
 
 

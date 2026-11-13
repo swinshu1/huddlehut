@@ -50,7 +50,7 @@ def test_linked_session_gets_new_messages_once(env, monkeypatch, capsys):
     _, out, _ = run("post-tool", bash(), monkeypatch, capsys)
     ctx = out["hookSpecificOutput"]
     assert ctx["hookEventName"] == "PostToolUse"
-    assert "codex-bbbb/result: tests green" in ctx["additionalContext"]
+    assert "bbbb/result: tests green" in ctx["additionalContext"]
     assert "my own post" not in ctx["additionalContext"]
     assert run("post-tool", bash(), monkeypatch, capsys)[1] is None          # not delivered twice
     assert store.unread(board.id, "claude-code-aaaa") == []                 # the MCP server agrees

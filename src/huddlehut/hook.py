@@ -190,12 +190,12 @@ def _holders(store, board_id: str, conflicts) -> list[str]:
     """'src/a.py, src/b.py held by codex-3f2a (active 2m ago)' per holding agent."""
     from .compact import _age
 
-    seen, by_agent = store.presence(board_id), {}
+    seen, by_agent, names = store.presence(board_id), {}, store.labels(board_id)
     for path, c in conflicts:
         by_agent.setdefault(c["agent"], []).append(path)
     now = time.time()
     return [
-        f"{', '.join(paths[:5])}{' …' if len(paths) > 5 else ''} held by {agent}"
+        f"{', '.join(paths[:5])}{' …' if len(paths) > 5 else ''} held by {names.get(agent, agent)}"
         f" (active {_age(now - (seen.get(agent) or {}).get('seen_at', now))} ago)"
         for agent, paths in by_agent.items()
     ]
@@ -247,6 +247,9 @@ def _needs_me(store, board_id: str, me: str, msgs) -> list:
         return []
     mine = {r["id"] for r in store._all("SELECT id FROM messages WHERE board_id=? AND author=?", (board_id, me))}
     names = mention_names(me, set(store.presence(board_id)) | {m.author for m in msgs})
+    nick = store.nicknames(board_id).get(me)
+    if nick:
+        names.add(nick)
     return [m for m in msgs if m.kind in ("question", "blocker") or m.reply_to in mine or mentions(m.content, names)]
 
 
@@ -307,7 +310,9 @@ def post_tool(inp: dict, client: str) -> dict | None:
 
         top = _git_info(state, cwd).get("toplevel")
         mine = set(state.get("mine", []))
-        fresh = [p for p in dict.fromkeys(normalize(e, top, cwd) for e in edited) if p not in mine]
+        # only files inside the repo are shared work; scratch files elsewhere stay private
+        fresh = [p for p in dict.fromkeys(normalize(e, top, cwd) for e in edited)
+                 if p not in mine and not os.path.isabs(p)]
     if not committed and not fresh and now - state.get("checked", 0) < INTERVAL:
         save(sid, state)
         return None
@@ -337,6 +342,9 @@ def post_tool(inp: dict, client: str) -> dict | None:
 
     info = _git_info(state, cwd)
     store.touch(board.id, state["me"], cwd, info.get("toplevel"), info.get("branch"))
+    if inp.get("model") and state.get("model") != inp["model"]:  # Codex reports the real model on every hook
+        store.set_model(board.id, state["me"], inp["model"])
+        state["model"] = inp["model"]
     if info.get("toplevel"):
         warned = set(state.get("warned_shared", []))
         for agent, p in store.live_agents(board.id, exclude=state["me"]).items():
@@ -344,7 +352,7 @@ def post_tool(inp: dict, client: str) -> dict | None:
                 warned.add(agent)
                 repo = Path(info["toplevel"]).name
                 notes.append(
-                    f"{agent} works in the same checkout ({info['toplevel']}). Uncommitted edits from both "
+                    f"{store.labels(board.id).get(agent, agent)} works in the same checkout ({info['toplevel']}). Uncommitted edits from both "
                     f"of you mix there. Safer: git worktree add ../{repo}-{state['me']} -b {state['me']}"
                 )
         state["warned_shared"] = sorted(warned)
@@ -424,7 +432,7 @@ def _guard_edit(inp: dict, tool: str, tool_input: dict) -> dict | None:
     cwd = inp.get("cwd")
     top = _git_info(state, cwd).get("toplevel")
     mine, passed = set(state.get("mine", [])), set(state.get("guard_passed", []))
-    todo = [p for p in dict.fromkeys(normalize(x, top, cwd) for x in paths) if p not in mine]
+    todo = [p for p in dict.fromkeys(normalize(x, top, cwd) for x in paths) if p not in mine and not os.path.isabs(p)]
     if not todo:
         save(sid, state)
         return None  # own files: no database needed

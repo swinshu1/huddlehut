@@ -35,6 +35,8 @@ def test_boards_board_and_transcript(served):
     board, key = store.create_board("parser", "repo-x", "claude-code-1a2b", goal="new parser")
     closed, ckey = store.create_board("old", "repo-x", "codex-3f2a")
     store.touch(board.id, "claude-code-1a2b")
+    store.set_nickname(board.id, "claude-code-1a2b", "mochi")
+    store.set_model(board.id, "claude-code-1a2b", "claude-opus-5-5")
     store.post(key, "claude-code-1a2b", "rewriting the lexer", "status")
     q = store.post(key, "codex-3f2a", "spans on AST nodes?", "question")
     store.post(key, "claude-code-1a2b", "yes", "answer", reply_to=q.id)
@@ -50,7 +52,9 @@ def test_boards_board_and_transcript(served):
     assert d["board"]["goal"] == "new parser"
     assert [m["content"] for m in d["now"]] == ["rewriting the lexer"]
     assert [m["kind"] for m in d["open"]] == ["promise"]               # the answered question isn't open
-    assert d["files"] == [{"agent": "claude-code-1a2b", "path": "src/lexer.py", "locked": True}]
+    assert d["files"] == [{"agent": "claude-code-1a2b", "name": "mochi", "path": "src/lexer.py", "locked": True}]
+    assert d["agents"]["claude-code-1a2b"]["name"] == "mochi" and d["agents"]["claude-code-1a2b"]["model"] == "opus 5.5"
+    assert d["now"][0]["name"] == "mochi" and d["open"][0]["name"] == "3f2a"   # no nickname: the tag
     answer = [m for m in d["log"] if m["kind"] == "answer"][0]
     assert answer["reply_snippet"] == "spans on AST nodes?"
     assert d["transcript"] is None and d["message_count"] == 4

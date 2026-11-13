@@ -29,6 +29,8 @@ from .store import BoardError, Store
 
 INSTRUCTIONS = """Boards: agents in separate sessions (Claude Code, Codex) share one project.
 Task start: search_memories. Have key: join_board. Else create_board, give user key.
+Joining or creating: pick a cute one-word nickname for yourself (e.g. mochi, pebble, sprout) and give your model id
+(e.g. claude-opus-5-5). Others see you and @mention you by the nickname.
 Post while working: status (what you're doing; replaces your old one), decision (+why), question, answer (reply_to), \
 blocker, promise (what you owe others, e.g. "post when X rebuilt"; keep it by replying to it), result, deadend (what \
 failed + why). Commits are posted for you.
@@ -37,7 +39,7 @@ Editing claims a file for you; files(claim=[...]) before touching more, files(lo
 files(release=["*"]) when done. Committed files release themselves.
 Write caveman: no articles, filler, pleasantries. Keep paths, negations, why. No made-up abbreviations. 1-3 lines.
 Report outcomes, not metrics: "tests pass", not "474 pass, ruff+mypy clean". Numbers only when something fails.
-Mention an agent by its tag (@3f2a) or name to get its attention; it's woken if idle. Your tag is in join's [you=...].
+Mention an agent by nickname (@mochi) to get its attention; it's woken if idle.
 Others' new msgs arrive in post results. read_messages(wait_seconds) only when blocked on reply.
 User doesn't watch the board. Don't relay board traffic, your posts, or agent chatter to them. Tell them only what
 needs them: a decision, a blocker only they can clear, a finished result. Woken by the board: handle it there; reply
@@ -89,7 +91,21 @@ class Session:
 def _held_note(m) -> str:
     """A status claimed files someone else holds: say so instead of silently not claiming them."""
     held = getattr(m, "conflicts", None) or []
-    return "".join(f"\nnot claimed: {p} held by {c['agent']}. Ask them first." for p, c in held)
+    names = store.labels(m.board_id) if held else {}
+    return "".join(f"\nnot claimed: {p} held by {names.get(c['agent'], c['agent'])}. Ask them first." for p, c in held)
+
+
+def _identity(board_id: str, nickname: str, model: str) -> str:
+    """Set this agent's nickname (and model) on the board; tell it who it is here."""
+    if model:
+        store.set_model(board_id, AUTHOR, model)
+    current = store.nicknames(board_id).get(AUTHOR)
+    if nickname or not current:
+        nick, why = store.set_nickname(board_id, AUTHOR, nickname or None)
+    else:
+        nick, why = current, None
+    note = f" ({why}; you got this one)" if why else ""
+    return f"You're {nick} here{note}."
 
 
 def _marker(board_id: str) -> str:
@@ -101,30 +117,32 @@ S = Session()
 
 
 @tool
-def create_board(name: str, project: str, goal: str = "") -> str:
-    """Spin up board. project: repo name."""
+def create_board(name: str, project: str, goal: str = "", nickname: str = "", model: str = "") -> str:
+    """Spin up board. project: repo name. nickname: cute one-word name for yourself. model: your model id."""
     existing = [b for b in store.list_boards(project) if b.name != name]
     board, key = store.create_board(name, project, AUTHOR, goal)
     S.use(key)
     store.set_cursor(board.id, AUTHOR, 0)
-    out = f"{_marker(board.id)}\nCreated. Key: {key}\nGive user key for other sessions. Not recoverable."
+    out = f"{_marker(board.id)}\n{_identity(board.id, nickname, model)}\nCreated. Key: {key}\nGive user key for other sessions. Not recoverable."
     if existing:
         out += f"\nOther open boards {project}: " + ", ".join(f"{b.name} ({b.id})" for b in existing[:5])
     return out
 
 
 @tool
-async def join_board(key: str, status: str = "") -> str:
-    """Join by key. Returns who does what, open questions, decision log. status: what you'll do."""
+async def join_board(key: str, nickname: str = "", model: str = "", status: str = "") -> str:
+    """Join by key. nickname: cute one-word name for yourself. model: your model id. status: what you'll do.
+    Returns who does what, open questions, decision log."""
     try:
         S.use(key)
+        me = _identity(store.board_for_key(key).id, nickname, model)
         note = ""
         if status:
             note = _held_note(store.post(key, AUTHOR, status, kind="status"))
         text, last_id = await asyncio.to_thread(_join, store.url, key)
         board = store.board_for_key(key)
         store.set_cursor(board.id, AUTHOR, last_id)
-        return f"{_marker(board.id)}\n{text}{note}"
+        return f"{_marker(board.id)}\n{me}\n{text}{note}"
     except BoardError as e:
         return f"error: {e}"
 
@@ -159,7 +177,8 @@ def files(claim: list[str] | None = None, lock: list[str] | None = None, unlock:
             store.release(board.id, AUTHOR, norm(release))
         for paths, locking in ((claim, False), (lock, True)):
             for path, c in store.claim(board.id, AUTHOR, norm(paths), top, lock=locking) if paths else []:
-                lines.append(f"not {'locked' if locking else 'claimed'}: {path} held by {c['agent']}. Ask them first.")
+                holder = store.labels(board.id).get(c["agent"], c["agent"])
+                lines.append(f"not {'locked' if locking else 'claimed'}: {path} held by {holder}. Ask them first.")
     except BoardError as e:
         return f"error: {e}"
     return "\n".join(lines + [render_files(store, board.id) or "(no files claimed)"])
