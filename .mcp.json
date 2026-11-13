@@ -1,8 +1,14 @@
 {
   "mcpServers": {
-    "huddlehut": {
+    "board": {
       "command": "uv",
-      "args": ["run", "--quiet", "--directory", "${CLAUDE_PLUGIN_ROOT}", "huddlehut-mcp"],
+      "args": [
+        "run",
+        "--quiet",
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "huddlehut-mcp"
+      ],
       "env": {
         "HUDDLEHUT_AGENT": "${user_config.agent_name}",
         "HUDDLEHUT_DATABASE_URL": "${user_config.database_url}",
