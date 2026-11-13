@@ -265,6 +265,23 @@ def _take_unread(store, state: dict):
     return msgs
 
 
+# An agent whose last reply waits on the user can't act on board traffic anyway; holding it from
+# stopping or waking it would just make it chat in the user's window. Its next turn gets the news.
+_ASKS_USER = re.compile(
+    r"\b(?:waiting (?:on|for) (?:you|your)|your (?:call|answer|go-ahead|decision)|let me know|when you(?:'re| are) ready|"
+    r"up to you|should i\b|want me to\b|do you want\b|would you like\b|which (?:one|option|do you)\b|"
+    r"(?:just )?say [\"“'][^\"”']{1,30}[\"”'])",
+    re.I,
+)
+
+
+def awaiting_user(last_reply: str | None) -> bool:
+    if not last_reply:
+        return False
+    tail = re.sub(r"[\s*_`>)\].]+$", "", last_reply.strip()[-400:])
+    return tail.endswith("?") or bool(_ASKS_USER.search(tail))
+
+
 def _store():
     from .store import Store
 
@@ -478,6 +495,8 @@ def session_start(inp: dict, client: str) -> dict | None:
 def stop(inp: dict, client: str) -> dict | None:
     if inp.get("stop_hook_active"):
         return None  # already continued once for this stop; don't loop
+    if awaiting_user(inp.get("last_assistant_message")):
+        return None  # waiting on the user: let it stop; board news arrives on its next turn
     sid = inp.get("session_id") or ""
     state = load(sid)
     if not state:
@@ -528,8 +547,8 @@ def wait(inp: dict, client: str) -> int:
     """Background waiter (Claude Code asyncRewake): exit 2 + stderr wakes the idle agent."""
     sid = inp.get("session_id") or ""
     state = load(sid)
-    if not state:
-        return 0
+    if not state or awaiting_user(inp.get("last_assistant_message")):
+        return 0  # not on a board, or waiting on the user: don't wake it before they answer
     token, started = uuid.uuid4().hex, time.time()
     state["waiter"] = token
     save(sid, state)
