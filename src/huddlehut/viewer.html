@@ -80,7 +80,15 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
 .log .same .who { visibility: hidden; }
 .log time { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 .log .re { color: var(--muted); font-size: 13px; }
-.text { overflow-wrap: anywhere; }
+.text { overflow-wrap: anywhere; white-space: pre-line; }
+.path, .text code, .sha { font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace; background: var(--hover); border-radius: 4px; padding: 0 4px; }
+.sha { background: none; padding: 0; }
+.ref { color: var(--muted); text-decoration: underline dotted; text-underline-offset: 3px; }
+.ref:hover { color: var(--fg); }
+.mention { font-weight: 600; color: hsl(var(--hue) 45% var(--chip-fg)); }
+.log li { scroll-margin: 80px; border-radius: 6px; transition: background-color .6s; }
+.log li.flash { background: var(--hover); }
+@media (prefers-reduced-motion: reduce) { .log li { transition: none; } }
 
 .link { color: var(--muted); margin-top: 28px; }
 .link:hover { color: var(--fg); }
@@ -132,6 +140,23 @@ function ago(t) {
 }
 const clock = t => new Date(t * 1000).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
 const day = t => new Date(t * 1000).toLocaleDateString([], {month: "short", day: "numeric"});
+const PATH = /(?<![\w\/.:@-])((?:[\w.-]+\/)+(?:[\w.*-]*[\w*])?|[\w-]+\.(?:py|pyi|ts|tsx|js|jsx|mjs|md|json|toml|ya?ml|sql|sh|go|rs|css|html|txt))(?![\w\/])/g;
+const COMMIT = /^committed ([0-9a-f]{7,40}) \(([^)]+)\): /;
+let AG = {};  // lowercase nickname or tag -> agent id, for @mentions on the current board
+// "#12" usually means message 12, but not after words like "gap", "PR" or "issue"
+const NOT_MSG = /(?:gap|item|issue|pr|step|case|ticket|check|number|no\.?|finding|row|line|part|phase)\s*$/i;
+function fmt(raw) {
+  let head = "", body = raw;
+  const c = raw.match(COMMIT);
+  if (c) { head = `committed <span class="sha">${c[1]}</span> <span class="dim">${esc(c[2])}</span> `; body = raw.slice(c[0].length); }
+  return head + esc(body).split(/(`[^`]+`)/).map(seg => /^`[^`]+`$/.test(seg) ? `<code>${seg.slice(1, -1)}</code>` : seg
+    .replace(PATH, (p0, p) => /[A-Za-z]/.test(p) ? `<span class="path">${p}</span>` : p0)
+    .replace(/(^|[^\w&;])#(\d+)\b/g, (m0, pre, n, at, str) => NOT_MSG.test(str.slice(0, at + pre.length))
+      ? m0 : `${pre}<a class="ref" href="#" data-ref="${n}">#${n}</a>`)
+    .replace(/(^|[^\w])@([\w-]+)/g, (m0, pre, n) => AG[n.toLowerCase()]
+      ? `${pre}<span class="mention" style="--hue:${hue(AG[n.toLowerCase()])}">@${esc(n)}</span>` : m0)
+  ).join("");
+}
 const VERB = {decision: "decided", question: "asks", answer: "answered", blocker: "blocked", promise: "promised",
               result: "reported", deadend: "dead end", status: "status"};
 
@@ -145,8 +170,8 @@ let boards = [], last = "", full = false;
 const open = new Set();
 
 function long(text, key) {
-  if (text.length < 240 || open.has(key)) return `<div class="text">${esc(text)}</div>`;
-  return `<div class="text clamp">${esc(text)}</div><button class="more" data-open="${esc(key)}">more</button>`;
+  if (text.length < 240 || open.has(key)) return `<div class="text">${fmt(text)}</div>`;
+  return `<div class="text clamp">${fmt(text)}</div><button class="more" data-open="${esc(key)}">more</button>`;
 }
 
 function side(route) {
@@ -163,13 +188,16 @@ function logList(ms) {
   return `<ol class="log">${ms.map((m, i) => {
     const p = ms[i - 1], same = p && p.author === m.author && m.at - p.at < 300;
     const verb = VERB[m.kind] && m.kind !== "status" ? `<span class="dim">${VERB[m.kind]}</span> ` : "";
-    const re = m.reply_to && m.reply_snippet ? `<div class="re">re: ${esc(m.reply_snippet)}</div>` : "";
-    return `<li class="${same ? "same" : ""}">${who(m.author, m.name)}<div>${re}<span class="text">${verb}${esc(m.content)}</span></div><time>${clock(m.at)}</time></li>`;
+    const re = m.reply_to ? `<div class="re">re <a class="ref" href="#" data-ref="${m.reply_to}">#${m.reply_to}</a>${m.reply_snippet ? `: ${esc(m.reply_snippet)}` : ""}</div>` : "";
+    return `<li id="m${m.id}" class="${same ? "same" : ""}">${who(m.author, m.name)}<div>${re}<span class="text">${verb}${fmt(m.content)}</span></div><time>${clock(m.at)}</time></li>`;
   }).join("")}</ol>`;
 }
 
 function board(d) {
   const b = d.board;
+  AG = {};
+  for (const m of [...d.now, ...d.open, ...d.log, ...(d.transcript || [])]) { AG[m.name.toLowerCase()] = m.author; AG[short(m.author)] = m.author; }
+  for (const [id, a] of Object.entries(d.agents)) { AG[(a.name || short(id)).toLowerCase()] = id; AG[short(id)] = id; }
   const ag = a => d.agents[a] || {};
   const away = a => [ag(a).model, ag(a).tag].filter(Boolean).map(t => `<span class="away">${esc(t)}</span>`).join("");
   const now = d.now.length
@@ -182,7 +210,7 @@ function board(d) {
     ? `<section><h2>files</h2><ul class="rows">${Object.entries(by).map(([a, fs]) => `<li><div>${who(a, nameOf(a))}</div><div>${fs.map(f =>
         `<div class="path">${esc(f.path)}${f.locked ? '<span class="lock">locked</span>' : ""}</div>`).join("")}</div></li>`).join("")}</ul></section>` : "";
   const attn = d.open.length
-    ? `<section><h2>needs an answer</h2><ul class="rows">${d.open.map(m => `<li><div>${who(m.author, m.name)}</div><div class="attn"><span class="dim">${VERB[m.kind]}</span> ${esc(m.content)}</div></li>`).join("")}</ul></section>` : "";
+    ? `<section><h2>needs an answer</h2><ul class="rows">${d.open.map(m => `<li><div>${who(m.author, m.name)}</div><div class="attn"><span class="dim">${VERB[m.kind]}</span> <span class="text">${fmt(m.content)}</span></div></li>`).join("")}</ul></section>` : "";
   const summary = d.summary ? `<section><h2>earlier</h2><p class="goal" style="white-space:pre-wrap;margin:0">${esc(d.summary)}</p></section>` : "";
   const logs = d.log.length ? `<section><h2>decisions and results</h2>${logList(d.log)}</section>` : "";
   const transcript = full && d.transcript ? `<section><h2>transcript</h2>${logList(d.transcript)}</section>` : "";
@@ -240,7 +268,18 @@ async function render(force = false) {
   if (typing) { $("#q").focus(); $("#q").setSelectionRange(caret, caret); }
 }
 
+async function goRef(id) {
+  let el = document.getElementById("m" + id);
+  if (!el && !full) { full = true; await render(true); el = document.getElementById("m" + id); }
+  if (!el) return;
+  el.scrollIntoView({block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"});
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1600);
+}
+
 document.addEventListener("click", e => {
+  const r = e.target.closest("[data-ref]");
+  if (r) { e.preventDefault(); goRef(r.dataset.ref); return; }
   const m = e.target.closest("[data-open]");
   if (m) { open.add(m.dataset.open); render(true); }
   if (e.target.id === "toggle") { full = !full; render(true); }
