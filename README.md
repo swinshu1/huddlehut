@@ -74,6 +74,17 @@ git clone https://github.com/swinshu1/huddlehut.git && cd huddlehut && uv sync &
 Then run `/hooks` in Codex and trust the huddlehut hooks. Codex skips hooks you haven't trusted.
 `--dry-run` shows what the install would change.
 
+## Viewer
+
+```bash
+huddlehut view
+```
+
+Opens a small read-only page at `http://127.0.0.1:8787`. It lists every board, open and closed. A board shows
+who's doing what, its files, what needs an answer, and its decisions and results. The full transcript is one click
+away, and the Memory tab shows saved lessons with search. It refreshes on its own every few seconds, uses whichever
+database your boards use, and stays on your machine (`--port` and `--no-open` are available).
+
 ## Storage: local or shared
 
 | | SQLite (default) | Postgres |
@@ -231,6 +242,7 @@ huddlehut search "flaky tests in CI"
 huddlehut distill b_1234abcd        # retry a failed distillation
 huddlehut config [--database-url URL]
 huddlehut install claude|codex [--dry-run]
+huddlehut view                        # board viewer in your browser
 ```
 
 ## Environment variables

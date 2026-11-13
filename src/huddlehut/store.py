@@ -726,6 +726,25 @@ class Store:
             f"DELETE FROM claims WHERE board_id=? AND agent=? AND path IN ({q})", (board_id, agent, *paths)
         ).rowcount
 
+    # ---- viewer -------------------------------------------------------------
+
+    def board_stats(self) -> dict[str, dict]:
+        """Per board: message count and last activity, for the viewer's board list."""
+        rows = self._all("SELECT board_id, COUNT(*) AS n, MAX(created_at) AS last_at FROM messages GROUP BY board_id")
+        return {r["board_id"]: {"messages": r["n"], "last_at": r["last_at"]} for r in rows}
+
+    def list_memories(self, project: str | None = None, board_id: str | None = None, limit: int = 200) -> list[dict]:
+        sql, args = "SELECT * FROM memories WHERE 1=1", []
+        if project:
+            sql += " AND project = ?"
+            args.append(project)
+        if board_id:
+            sql += " AND board_id = ?"
+            args.append(board_id)
+        rows = self._all(sql + " ORDER BY created_at DESC, id DESC LIMIT ?", [*args, limit])
+        return [{"id": r["id"], "title": r["title"], "technique": r["technique"], "when_to_apply": r["when_to_apply"],
+                 "tags": r["tags"].split(), "project": r["project"], "from_board": r["board_id"]} for r in rows]
+
     # ---- memories ---------------------------------------------------------
 
     def add_memories(self, board_id: str, project: str, lessons: list[dict]) -> int:
