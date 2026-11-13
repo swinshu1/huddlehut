@@ -215,6 +215,33 @@ class _Sqlite:
                 except sqlite3.OperationalError as e:  # another process added it first
                     if "duplicate column" not in str(e):
                         raise
+        self._rebuild_claims_if_stale()
+
+    def _rebuild_claims_if_stale(self) -> None:
+        """A pre-release build created claims with PRIMARY KEY (board_id, path); claims are now per
+        checkout. Rebuild that table in place, keeping its rows (they're short-lived anyway)."""
+        def pk():
+            rows = sorted((r for r in self.conn.execute("PRAGMA table_info(claims)") if r["pk"]), key=lambda r: r["pk"])
+            return [r["name"] for r in rows]
+
+        if pk() in ([], ["board_id", "toplevel", "path"]):
+            return
+        with self.tx():
+            if pk() == ["board_id", "toplevel", "path"]:
+                return  # another process rebuilt it while we waited for the lock
+            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(claims)")}
+            locked = "COALESCE(locked, 0)" if "locked" in cols else "0"
+            self.conn.execute("ALTER TABLE claims RENAME TO claims_stale")
+            self.conn.execute(
+                "CREATE TABLE claims (board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,"
+                " agent TEXT NOT NULL, since REAL NOT NULL, locked INTEGER NOT NULL DEFAULT 0,"
+                " PRIMARY KEY (board_id, toplevel, path))"
+            )
+            self.conn.execute(
+                "INSERT OR IGNORE INTO claims (board_id, toplevel, path, agent, since, locked)"
+                f" SELECT board_id, COALESCE(toplevel, ''), path, agent, since, {locked} FROM claims_stale"
+            )
+            self.conn.execute("DROP TABLE claims_stale")
 
     def execute(self, sql: str, args=()):
         return self.conn.execute(sql, args)

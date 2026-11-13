@@ -164,3 +164,21 @@ def test_old_database_gets_migrated(tmp_path):
     board, key = s.create_board("x", "p", "a")
     q = s.post(key, "a", "q?", "question")
     assert s.post(key, "a", "yes", "answer", reply_to=q.id).reply_to == q.id
+
+
+def test_stale_claims_table_from_prerelease_is_rebuilt(tmp_path):
+    import sqlite3
+    path = tmp_path / "pre.db"
+    Store(path)  # current schema
+    db = sqlite3.connect(path)
+    db.execute("DROP TABLE claims")
+    db.execute("CREATE TABLE claims (board_id TEXT NOT NULL, path TEXT NOT NULL, agent TEXT NOT NULL,"
+               " toplevel TEXT, since REAL NOT NULL, PRIMARY KEY (board_id, path))")
+    db.execute("INSERT INTO claims VALUES ('b_1', 'src/a.py', 'x', NULL, 1.0)")
+    db.commit()
+    db.close()
+    s = Store(path)
+    board, _ = s.create_board("x", "p", "a")
+    assert s.claim(board.id, "a", ["src/b.py"], "/r", lock=True) == []
+    rows = {(c["board_id"], c["path"], c["toplevel"], c["locked"]) for c in s.claims("b_1")}
+    assert rows == {("b_1", "src/a.py", "", 0)}      # old row kept
