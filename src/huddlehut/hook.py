@@ -41,7 +41,7 @@ BOARD_TOOL = re.compile(r"^mcp__.*huddlehut.*__")
 RISKY_GIT = re.compile(r"\bgit\b.*\b(commit|stash|reset|checkout|restore|clean)\b")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}  # Claude Code; Codex edits via apply_patch
 INTERVAL = float(os.environ.get("HUDDLEHUT_HOOK_INTERVAL", "5"))
-WAIT_SECONDS = float(os.environ.get("HUDDLEHUT_WAIT_SECONDS", "1800"))
+WAIT_SECONDS = float(os.environ.get("HUDDLEHUT_WAIT_SECONDS", "14400"))  # idle agents stay wakeable for 4h
 WAIT_POLL = float(os.environ.get("HUDDLEHUT_WAIT_POLL", "10"))
 WAIT_GRACE = 3  # let the synchronous Stop hook claim anything already unread
 GIT_INFO_TTL = 60
@@ -214,10 +214,38 @@ def _render(store, msgs) -> str:
     return text
 
 
+_EVERYONE = re.compile(r"(?<![\w-])@(?:all|everyone|everybody|agents|team)\b", re.I)
+
+
+def mention_names(me: str, others) -> set[str]:
+    """How other agents may address this one: full name, 4-char tag, and the plain tool name
+    ("codex", "claude-code", "claude") when no other agent on the board shares it."""
+    names = {me}
+    base, _, tag = me.rpartition("-")
+    if base and re.fullmatch(r"[0-9a-f]{4}", tag):
+        names.add(tag)
+        other_bases = {o.rpartition("-")[0] for o in others if o != me}
+        if base not in other_bases:
+            names.add(base)
+            short = base.split("-")[0]
+            if short != base and short not in {b.split("-")[0] for b in other_bases}:
+                names.add(short)
+    return names
+
+
+def mentions(text: str, names: set[str]) -> bool:
+    if _EVERYONE.search(text):
+        return True
+    return any(re.search(rf"(?<![\w-])@?{re.escape(n)}(?![\w-])", text, re.I) for n in names)
+
+
 def _needs_me(store, board_id: str, me: str, msgs) -> list:
     """Unread messages that call for this agent: questions, blockers, replies to it, mentions."""
+    if not msgs:
+        return []
     mine = {r["id"] for r in store._all("SELECT id FROM messages WHERE board_id=? AND author=?", (board_id, me))}
-    return [m for m in msgs if m.kind in ("question", "blocker") or m.reply_to in mine or me in m.content]
+    names = mention_names(me, set(store.presence(board_id)) | {m.author for m in msgs})
+    return [m for m in msgs if m.kind in ("question", "blocker") or m.reply_to in mine or mentions(m.content, names)]
 
 
 def _open_promises(store, board_id: str, me: str) -> list:
@@ -504,7 +532,7 @@ def wait(inp: dict, client: str) -> int:
         msgs = store.unread(state["board"], state["me"])
         if _needs_me(store, state["board"], state["me"], msgs):
             store.set_cursor(state["board"], state["me"], msgs[-1].id)
-            print("[huddlehut] reply arrived:\n" + _render(store, msgs), file=sys.stderr)
+            print("[huddlehut] new on the board for you:\n" + _render(store, msgs), file=sys.stderr)
             return 2
         if store.get_board(state["board"]).status != "open":
             return 0
