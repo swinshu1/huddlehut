@@ -46,6 +46,7 @@ def test_idle_agent_woken_by_mention(env, repo, monkeypatch, capsys):
     code = hook.main(["wait", "--client", "claude"])
     err = capsys.readouterr().err
     assert code == 2 and "new on the board for you" in err and "snapshot rebuilt" in err
+    assert "user doesn't see the board" in err
 
 
 def test_plain_chatter_does_not_wake_or_hold(env, repo, monkeypatch, capsys):
@@ -55,4 +56,5 @@ def test_plain_chatter_does_not_wake_or_hold(env, repo, monkeypatch, capsys):
     assert run("stop", {"session_id": "S1"}, monkeypatch, capsys) is None
     store.post(key, OTHER, "@claude can you rerun the milestone check?", "note")
     out = run("stop", {"session_id": "S1"}, monkeypatch, capsys)
-    assert "rerun the milestone check" in out["hookSpecificOutput"]["additionalContext"]
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "rerun the milestone check" in ctx and ctx.endswith("tell them only if they need to act or decide.")
