@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Huddle Hut</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2064%2064%22%20fill%3D%22none%22%20stroke%3D%22%236e6e73%22%20stroke-width%3D%226%22%20stroke-linecap%3D%22round%22%3E%3Cpath%20d%3D%22M8%2038%20A26%2026%200%200%201%2056%2038%22/%3E%3Ccircle%20cx%3D%2221%22%20cy%3D%2246%22%20r%3D%228%22%20fill%3D%22%23AFA9EC%22%20stroke%3D%22none%22/%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2243%22%20r%3D%228%22%20fill%3D%22%235DCAA5%22%20stroke%3D%22none%22/%3E%3Ccircle%20cx%3D%2243%22%20cy%3D%2246%22%20r%3D%228%22%20fill%3D%22%23ED93B1%22%20stroke%3D%22none%22/%3E%3C/svg%3E">
 <style>
 :root {
   --bg: #ffffff;
@@ -40,7 +41,7 @@ h1, h2 { margin: 0; font-weight: 600; }
 .app { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
 .side { border-right: 1px solid var(--line); padding: 28px 12px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; padding: 0 10px; margin-bottom: 28px; }
-.brand svg { width: 20px; height: 20px; color: var(--fg); }
+.brand svg { width: 30px; height: 21px; color: var(--fg); flex: none; }
 .label { font-size: 12.5px; color: var(--muted); padding: 0 10px; margin: 20px 0 4px; }
 .side ul { list-style: none; margin: 0; padding: 0; }
 .side li a, .side .mem { display: block; padding: 6px 10px; border-radius: 10px; }
@@ -109,7 +110,7 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
 <body>
 <div class="app">
   <aside class="side">
-    <a class="brand" href="#/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9.5h13V10"/><path d="M10 19.5v-5h4v5"/></svg>huddle hut</a>
+    <a class="brand" href="#/"><svg viewBox="6 16 52 36" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" aria-hidden="true"><path d="M10 36 A24 24 0 0 1 54 36"/><circle cx="23" cy="43" r="6" fill="#AFA9EC" stroke="none"/><circle cx="32" cy="41" r="6" fill="#5DCAA5" stroke="none"/><circle cx="41" cy="43" r="6" fill="#ED93B1" stroke="none"/></svg>huddle hut</a>
     <div class="label">open</div>
     <ul id="open-boards"></ul>
     <div class="label" id="closed-label">closed</div>
