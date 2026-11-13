@@ -50,18 +50,24 @@ def test_boards_board_and_transcript(served):
 
     d = get(f"{base}/api/boards/{board.id}")
     assert d["board"]["goal"] == "new parser"
-    assert [m["content"] for m in d["now"]] == ["rewriting the lexer"]
-    assert [m["kind"] for m in d["open"]] == ["promise"]               # the answered question isn't open
-    assert d["files"] == [{"agent": "claude-code-1a2b", "name": "mochi", "path": "src/lexer.py", "locked": True}]
-    assert d["agents"]["claude-code-1a2b"]["name"] == "mochi" and d["agents"]["claude-code-1a2b"]["model"] == "opus 5.5"
-    assert d["now"][0]["name"] == "mochi" and d["open"][0]["name"] == "3f2a"   # no nickname: the tag
-    answer = [m for m in d["log"] if m["kind"] == "answer"][0]
-    assert answer["reply_snippet"] == "spans on AST nodes?"
-    assert d["transcript"] is None and d["message_count"] == 4
+    assert [m["id"] for m in d["stream"]] == sorted(m["id"] for m in d["stream"]) and len(d["stream"]) == 4
+    assert d["message_count"] == 4
+    agent = d["agents"]["claude-code-1a2b"]
+    assert agent["name"] == "mochi" and agent["model"] == "opus 5.5"
+    assert agent["files"] == [{"path": "src/lexer.py", "locked": True}]
+    by_kind = {m["kind"]: m for m in d["stream"]}
+    assert by_kind["promise"]["open"] is True and by_kind["question"]["open"] is False   # answered
+    assert by_kind["answer"]["reply_snippet"] == "spans on AST nodes?"
+    assert by_kind["status"]["name"] == "mochi" and by_kind["promise"]["name"] == "3f2a"
+    assert d["waiting"] == []
 
-    full = get(f"{base}/api/boards/{board.id}?full=1")
-    assert [m["id"] for m in full["transcript"]] == sorted(m["id"] for m in full["transcript"])
-    assert len(full["transcript"]) == 4
+    store.set_waiting(board.id, "claude-code-1a2b", "Should I rerun the measurement?")
+    q2 = store.post(key, "codex-3f2a", "@user ok to drop the old seeds?", "question")
+    w = get(f"{base}/api/boards/{board.id}")["waiting"]
+    assert {(x["source"], x["name"]) for x in w} == {("session", "mochi"), ("board", "3f2a")}
+    store.post(key, "claude-code-1a2b", "user said yes", "answer", reply_to=q2.id)
+    store.set_waiting(board.id, "claude-code-1a2b", None)
+    assert get(f"{base}/api/boards/{board.id}")["waiting"] == []
 
 
 def test_memory_list_and_search(served):

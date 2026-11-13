@@ -12,11 +12,15 @@ import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import re
 from importlib import resources
 from urllib.parse import parse_qs, urlparse
 
 from .compact import presence_tag
 from .store import IDLE_AFTER, BoardError, Message, Store, short_id, short_model
+
+
+USER_MENTION = re.compile(r"(?<![\w-])@(?:user|human)\b", re.I)
 
 
 def _msg(m: Message, snippets: dict[int, str], names: dict[str, str]) -> dict:
@@ -46,40 +50,43 @@ class Viewer:
                             "agents": len(seen)})
         return sorted(out, key=lambda b: (b["status"] != "open", -b["last_at"]))
 
-    def board(self, board_id: str, full: bool = False) -> dict:
-        from .compact import NOTES_SHOWN
-
+    def board(self, board_id: str, limit: int = 500) -> dict:
+        """One stream (newest last; the page reverses it) plus what's waiting on the user."""
         with self.lock:
             s = self.store
             b = s.get_board(board_id)
             seen = s.presence(b.id)
-            statuses, open_items = s.current_statuses(b.id), s.open_items(b.id)
-            log = s.log_after(b.id, b.summary_through)
-            note_ids = [m.id for m in log if m.kind == "note"]
-            hidden = set(note_ids[:-NOTES_SHOWN]) if len(note_ids) > NOTES_SHOWN else set()
-            log = [m for m in log if m.id not in hidden]
-            transcript = s.all_messages(b.id) if full else []
-            msgs = statuses + open_items + log + transcript
-            snippets = s.snippets({m.reply_to for m in msgs if m.reply_to})
             names = s.labels(b.id)
+            msgs = s.all_messages(b.id)
+            total = len(msgs)
+            msgs = msgs[-limit:]
+            snippets = s.snippets({m.reply_to for m in msgs if m.reply_to})
+            open_ids = {m.id for m in s.open_items(b.id)}
+            files: dict[str, list[dict]] = {}
+            for c in s.claims(b.id):
+                files.setdefault(c["agent"], []).append({"path": c["path"], "locked": bool(c.get("locked"))})
             agents = {a: {"name": names.get(a) or short_id(a), "model": short_model(p.get("model")),
                           "tag": presence_tag(p).strip(" ()"), "state": p["state"], "seen_at": p["seen_at"],
-                          "branch": p.get("branch")} for a, p in seen.items()}
+                          "files": files.get(a, [])} for a, p in seen.items()}
+            # waiting on the user: sessions whose last reply asked them something, and open @user posts
+            waiting = [{"author": a, "name": names.get(a) or short_id(a), "content": p["waiting"],
+                        "at": p["waiting_at"], "source": "session"}
+                       for a, p in seen.items() if p.get("waiting") and p["state"] == "active"]
+            waiting += [dict(_msg(m, snippets, names), source="board")
+                        for m in msgs if m.id in open_ids and USER_MENTION.search(m.content)]
+            stream = []
+            for m in msgs:
+                d = _msg(m, snippets, names)
+                d["open"] = m.id in open_ids
+                stream.append(d)
             return {
                 "board": {"id": b.id, "name": b.name, "project": b.project, "goal": b.goal, "status": b.status,
-                          "created_at": b.created_at, "closed_at": b.closed_at, "outcome": b.outcome,
-                          "distill_status": b.distill_status},
+                          "created_at": b.created_at, "closed_at": b.closed_at, "outcome": b.outcome},
                 "agents": agents,
-                "now": [_msg(m, snippets, names) for m in statuses],
-                "files": [{"agent": c["agent"], "name": names.get(c["agent"]) or short_id(c["agent"]), "path": c["path"],
-                           "locked": bool(c.get("locked"))} for c in s.claims(b.id)],
-                "open": [_msg(m, snippets, names) for m in open_items],
-                "summary": b.summary,
-                "log": [_msg(m, snippets, names) for m in log],
-                "hidden_notes": len(hidden),
-                "message_count": s.board_stats().get(b.id, {}).get("messages", 0),
-                "transcript": [_msg(m, snippets, names) for m in transcript] if full else None,
-                "lessons": s.list_memories(board_id=b.id),
+                "waiting": sorted(waiting, key=lambda w: w["at"] or 0, reverse=True),
+                "stream": stream,
+                "message_count": total,
+                "lessons": len(s.list_memories(board_id=b.id)),
             }
 
     def memory(self, q: str = "", project: str = "") -> dict:
@@ -120,7 +127,7 @@ def make_handler(viewer: Viewer):
                 elif url.path == "/api/boards":
                     self._json(viewer.boards())
                 elif url.path.startswith("/api/boards/"):
-                    self._json(viewer.board(url.path.rsplit("/", 1)[-1], full=q.get("full") == "1"))
+                    self._json(viewer.board(url.path.rsplit("/", 1)[-1]))
                 elif url.path == "/api/memory":
                     self._json(viewer.memory(q.get("q", ""), q.get("project", "")))
                 else:

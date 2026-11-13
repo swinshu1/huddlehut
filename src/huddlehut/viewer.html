@@ -74,6 +74,17 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
 .lock { font-size: 12px; color: var(--muted); margin-left: 6px; }
 .attn::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--attn); margin-right: 8px; vertical-align: 2px; }
 
+.roster { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 16px; align-items: baseline; }
+.roster .agent { display: inline-flex; align-items: baseline; gap: 6px; cursor: default; }
+.roster .sub { font-size: 12px; color: var(--muted); }
+.waiting { list-style: none; margin: 32px 0 0; padding: 0; }
+.waiting li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; gap: 14px; padding: 12px 14px;
+  margin-bottom: 8px; border-radius: 12px; background: color-mix(in srgb, var(--attn) 10%, transparent); }
+.waiting .label { font-size: 12.5px; color: var(--attn); margin-bottom: 2px; }
+.waiting .who { align-self: start; justify-self: start; }
+.waiting time { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.stream { margin-top: 32px; }
+.dot::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--attn); margin-right: 6px; vertical-align: 2px; }
 .log { list-style: none; margin: 0; padding: 0; }
 .log li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; gap: 14px; padding: 7px 0; }
 .log .who { align-self: start; justify-self: start; }
@@ -169,7 +180,7 @@ async function get(url) {
   return r.json();
 }
 
-let boards = [], last = "", full = false;
+let boards = [], last = "";
 const open = new Set();
 
 function long(text, key) {
@@ -193,38 +204,36 @@ function logList(ms) {  // newest first; a run of posts by one agent shows its p
     const p = list[i - 1], same = p && p.author === m.author && p.at - m.at < 300;
     const verb = VERB[m.kind] && m.kind !== "status" ? `<span class="dim">${VERB[m.kind]}</span> ` : "";
     const re = m.reply_to ? `<div class="re">re <a class="ref" href="#" data-ref="${m.reply_to}">#${m.reply_to}</a>${m.reply_snippet ? `: ${esc(m.reply_snippet)}` : ""}</div>` : "";
-    return `<li id="m${m.id}" class="${same ? "same" : ""}">${who(m.author, m.name)}<div>${re}<span class="text">${verb}${fmt(m.content)}</span></div><time>${clock(m.at)}</time></li>`;
+    const dot = m.open ? `<span class="dot" title="not answered yet"></span>` : "";
+    return `<li id="m${m.id}" class="${same ? "same" : ""}">${who(m.author, m.name)}<div>${re}<span class="text">${dot}${verb}${fmt(m.content)}</span></div><time>${clock(m.at)}</time></li>`;
   }).join("")}</ol>`;
 }
 
 function board(d) {
   const b = d.board;
   AG = {};
-  for (const m of [...d.now, ...d.open, ...d.log, ...(d.transcript || [])]) { AG[m.name.toLowerCase()] = m.author; AG[short(m.author)] = m.author; }
+  for (const m of d.stream) { AG[m.name.toLowerCase()] = m.author; AG[short(m.author)] = m.author; }
   for (const [id, a] of Object.entries(d.agents)) { AG[(a.name || short(id)).toLowerCase()] = id; AG[short(id)] = id; }
-  const ag = a => d.agents[a] || {};
-  const away = a => [ag(a).model, ag(a).tag].filter(Boolean).map(t => `<span class="away">${esc(t)}</span>`).join("");
-  const now = d.now.length
-    ? `<ul class="rows">${[...d.now].reverse().map(m => `<li><div>${who(m.author, m.name)}${away(m.author)}</div><div>${long(m.content, "s" + m.id)}</div></li>`).join("")}</ul>`
-    : '<p class="dim">nobody has posted a status yet.</p>';
-  const by = {};
-  for (const f of d.files) (by[f.agent] ||= []).push(f);
-  const nameOf = a => (by[a] && by[a][0].name) || ag(a).name;
-  const files = Object.keys(by).length
-    ? `<section><h2>files</h2><ul class="rows">${Object.entries(by).map(([a, fs]) => `<li><div>${who(a, nameOf(a))}</div><div>${fs.map(f =>
-        `<div class="path">${esc(f.path)}${f.locked ? '<span class="lock">locked</span>' : ""}</div>`).join("")}</div></li>`).join("")}</ul></section>` : "";
-  const attn = d.open.length
-    ? `<section><h2>needs an answer</h2><ul class="rows">${[...d.open].reverse().map(m => `<li><div>${who(m.author, m.name)}</div><div class="attn"><span class="dim">${VERB[m.kind]}</span> <span class="text">${fmt(m.content)}</span></div></li>`).join("")}</ul></section>` : "";
-  const summary = d.summary ? `<section><h2>earlier</h2><p class="goal" style="white-space:pre-wrap;margin:0">${esc(d.summary)}</p></section>` : "";
-  const logs = d.log.length ? `<section><h2>decisions and results</h2>${logList(d.log)}</section>` : "";
-  const transcript = full && d.transcript ? `<section><h2>transcript, newest first</h2>${logList(d.transcript)}</section>` : "";
-  const toggle = `<div><button class="link" id="toggle">${full ? "hide transcript" : `show transcript (${d.message_count})`}</button></div>`;
-  const lessons = d.lessons.length ? `<section><h2>lessons</h2>${lessonList(d.lessons, false)}</section>` : "";
+  const roster = Object.entries(d.agents)
+    .sort(([, x], [, y]) => (x.state === "left") - (y.state === "left") || y.seen_at - x.seen_at)
+    .map(([id, a]) => {
+      const files = a.files.map(f => f.path + (f.locked ? " (locked)" : "")).join("\n");
+      const sub = [a.model, a.tag].filter(Boolean).join(", ");
+      return `<span class="agent" title="${esc(files ? "files:\n" + files : "no files claimed")}">${who(id, a.name)}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</span>`;
+    }).join("");
+  const waiting = d.waiting.length ? `<ul class="waiting">${d.waiting.map(w => `<li>${who(w.author, w.name)}
+      <div><div class="label">${w.source === "session" ? "waiting on you" : "asks you"}</div>${long(w.content, "w" + w.author + (w.id || ""))}</div>
+      <time>${w.at ? clock(w.at) : ""}</time></li>`).join("")}</ul>` : "";
+  const older = d.message_count > d.stream.length ? `<p class="dim">${d.message_count - d.stream.length} older messages not shown.</p>` : "";
+  const lessons = d.lessons ? `<p class="dim"><a href="#/memory">${d.lessons} lesson${d.lessons === 1 ? "" : "s"} saved from this board</a></p>` : "";
   const outcome = b.status !== "open" && b.outcome ? `<p class="goal dim">outcome: ${esc(b.outcome)}</p>` : "";
+  const stream = d.stream.length ? logList(d.stream) : '<p class="dim">nothing posted yet.</p>';
   return `<h1 class="title">${esc(b.name)}</h1>
     <div class="meta">${esc(b.project)}, ${b.status === "open" ? "open" : "closed"} since ${day(b.status === "open" ? b.created_at : b.closed_at || b.created_at)}</div>
     ${b.goal ? `<p class="goal">${esc(b.goal)}</p>` : ""}${outcome}
-    <section><h2>now</h2>${now}</section>${attn}${files}${summary}${logs}${toggle}${transcript}${lessons}`;
+    ${roster ? `<div class="roster">${roster}</div>` : ""}
+    ${waiting}
+    <div class="stream">${stream}${older}${lessons}</div>`;
 }
 
 function lessonList(ls, src = true) {
@@ -258,7 +267,7 @@ async function render(force = false) {
   const r = route(); let html;
   try {
     boards = await get("/api/boards");
-    html = r.view === "board" ? board(await get(`/api/boards/${r.board}${full ? "?full=1" : ""}`))
+    html = r.view === "board" ? board(await get(`/api/boards/${r.board}`))
       : r.view === "memory" ? memory(await get(`/api/memory?q=${encodeURIComponent(r.q)}`), r.q) : overview();
   } catch (e) {
     html = `<h1 class="title">can't load this</h1><p class="empty">${esc(e.message)}. is huddlehut view still running?</p>`;
@@ -273,8 +282,7 @@ async function render(force = false) {
 }
 
 async function goRef(id) {
-  let el = document.getElementById("m" + id);
-  if (!el && !full) { full = true; await render(true); el = document.getElementById("m" + id); }
+  const el = document.getElementById("m" + id);
   if (!el) return;
   el.scrollIntoView({block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"});
   el.classList.add("flash");
@@ -286,14 +294,13 @@ document.addEventListener("click", e => {
   if (r) { e.preventDefault(); goRef(r.dataset.ref); return; }
   const m = e.target.closest("[data-open]");
   if (m) { open.add(m.dataset.open); render(true); }
-  if (e.target.id === "toggle") { full = !full; render(true); }
 });
 document.addEventListener("input", e => {
   if (e.target.id !== "q") return;
   clearTimeout(window._t);
   window._t = setTimeout(() => { history.replaceState(null, "", `#/memory?q=${encodeURIComponent(e.target.value)}`); render(true); }, 250);
 });
-window.addEventListener("hashchange", () => { full = false; last = ""; render(true); scrollTo(0, 0); });
+window.addEventListener("hashchange", () => { last = ""; render(true); scrollTo(0, 0); });
 render(true);
 setInterval(() => { if (!document.hidden) render(); }, 4000);
 </script>
