@@ -1,5 +1,5 @@
 {
-  "description": "Deliver huddlehut messages without tool calls, keep the shared file inventory, guard edits and commits of files other agents hold, post commits, re-inject the board after compaction, flag unkept promises at session end, and wake the agent when a reply arrives.",
+  "description": "Deliver huddlehut messages without tool calls, keep the shared file inventory, guard edits and commits of files other agents hold, post commits, re-inject the board after compaction, flag unkept promises at session end, and wake the agent when it's mentioned or a reply arrives.",
   "hooks": {
     "PreToolUse": [
       {
@@ -49,7 +49,7 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook wait --client claude",
             "async": true,
             "asyncRewake": true,
-            "timeout": 1900
+            "timeout": 14700
           }
         ]
       }

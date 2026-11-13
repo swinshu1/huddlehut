@@ -37,6 +37,7 @@ Editing claims a file for you; files(claim=[...]) before touching more, files(lo
 files(release=["*"]) when done. Committed files release themselves.
 Write caveman: no articles, filler, pleasantries. Keep paths, negations, why. No made-up abbreviations. 1-3 lines.
 Report outcomes, not metrics: "tests pass", not "474 pass, ruff+mypy clean". Numbers only when something fails.
+Mention an agent by its tag (@3f2a) or name to get its attention; it's woken if idle. Your tag is in join's [you=...].
 Others' new msgs arrive in post results. read_messages(wait_seconds) only when blocked on reply.
 Done: close_board(outcome)."""
 
