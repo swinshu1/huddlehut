@@ -16,7 +16,7 @@ from pathlib import Path
 
 import time
 
-from .store import IDLE_AFTER, Board, Message, Store, env, fmt_message
+from .store import IDLE_AFTER, Board, Message, Store, env, fmt_message, short_model
 
 MODEL = os.environ.get("HUDDLEHUT_COMPACT_MODEL", os.environ.get("HUDDLEHUT_MODEL", "claude-opus-5-5"))
 COMPACT_AFTER_CHARS = int(os.environ.get("HUDDLEHUT_COMPACT_AFTER_CHARS", "6000"))  # ~1.5K tokens
@@ -38,10 +38,13 @@ the summary."""
 
 def render_entries(store: Store, msgs: list[Message], shown_ids: set[int] | None = None) -> str:
     """Lines for messages; a reply to something not shown alongside it gets a snippet of the target."""
+    if not msgs:
+        return ""
     shown_ids = shown_ids or {m.id for m in msgs}
     targets = {m.reply_to for m in msgs if m.reply_to and m.reply_to not in shown_ids}
     snips = store.snippets(targets)
-    return "\n".join(fmt_message(m, snips.get(m.reply_to, "")) for m in msgs)
+    names = store.labels(msgs[0].board_id)
+    return "\n".join(fmt_message(m, snips.get(m.reply_to, ""), names.get(m.author)) for m in msgs)
 
 
 def _log_chars(log: list[Message]) -> int:
@@ -123,11 +126,12 @@ def render_files(store: Store, board_id: str, per_agent: int = 8) -> str:
     if not claims:
         return ""
     seen = store.presence(board_id)
+    names = store.labels(board_id)
     by_agent: dict[str, list[str]] = {}
     for c in claims:
         by_agent.setdefault(c["agent"], []).append(c["path"] + (" (locked)" if c.get("locked") else ""))
     lines = [
-        f"{agent}{presence_tag(seen.get(agent))}: {', '.join(paths[:per_agent])}"
+        f"{names.get(agent, agent)}{presence_tag(seen.get(agent))}: {', '.join(paths[:per_agent])}"
         + (f" +{len(paths) - per_agent} more" if len(paths) > per_agent else "")
         for agent, paths in by_agent.items()
     ]
@@ -139,6 +143,12 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
     statuses = store.current_statuses(board.id)
     open_items = store.open_items(board.id)
     seen = store.presence(board.id)
+    names = store.labels(board.id)
+
+    def label(agent: str) -> str:  # "mochi (opus 5.5)": the model shows in the roster only
+        model = short_model((seen.get(agent) or {}).get("model"))
+        return names.get(agent, agent) + (f" ({model})" if model else "")
+
     log = store.log_after(board.id, board.summary_through)
 
     note_ids = [m.id for m in log if m.kind == "note"]
@@ -151,7 +161,7 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
     parts = [head + (f" goal: {board.goal}" if board.goal else "")]
     if statuses:
         parts.append("Now:\n" + "\n".join(
-            f"#{m.id} {m.author}{presence_tag(seen.get(m.author))}: {m.content}" for m in statuses))
+            f"#{m.id} {label(m.author)}{presence_tag(seen.get(m.author))}: {m.content}" for m in statuses))
     inventory = render_files(store, board.id)
     if inventory:
         parts.append(inventory)
@@ -159,7 +169,8 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
         lines = render_entries(store, open_items).split("\n")
         # flag open promises whose author is gone: someone else has to pick them up
         lines = [
-            ln.replace(f" {m.author}/", f" {m.author}{presence_tag(seen.get(m.author))}/", 1)
+            ln.replace(f" {names.get(m.author, m.author)}/",
+                       f" {names.get(m.author, m.author)}{presence_tag(seen.get(m.author))}/", 1)
             if m.kind == "promise" else ln
             for ln, m in zip(lines, open_items)
         ]

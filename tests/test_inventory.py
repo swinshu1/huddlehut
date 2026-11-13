@@ -60,8 +60,8 @@ def test_view_shows_files_by_agent(store):
     store.claim(board.id, OTHER, ["tests/test_api.py"])
     store.mark_left(board.id, OTHER)
     text, _ = render_view(store, board)
-    assert f"Files:\n{ME}: src/m0.py, " in text and "+2 more" in text
-    assert f"{OTHER} (left 0m): tests/test_api.py" in text
+    assert "Files:\naaaa: src/m0.py, " in text and "+2 more" in text
+    assert "bbbb (left 0m): tests/test_api.py" in text
     assert "Now:\n" in text and "rebuilding snapshot" in text
 
 
@@ -94,12 +94,12 @@ def test_edit_guard_blocks_first_edit_of_held_file(env, repo, monkeypatch, capsy
     out = run("pre-tool", edit(repo / "src" / "api.py", repo), monkeypatch, capsys)
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "src/api.py held by codex-bbbb" in reason and "Edit again to proceed" in reason
+    assert "src/api.py held by bbbb" in reason and "Edit again to proceed" in reason
     assert run("pre-tool", edit(repo / "src" / "api.py", repo), monkeypatch, capsys) is None   # retry proceeds
     assert run("pre-tool", edit(repo / "src" / "ui.py", repo), monkeypatch, capsys) is None    # free file
 
     out = run("post-tool", edit(repo / "src" / "api.py", repo), monkeypatch, capsys)          # edited anyway
-    assert "you edited src/api.py held by codex-bbbb" in out["hookSpecificOutput"]["additionalContext"]
+    assert "you edited src/api.py held by bbbb" in out["hookSpecificOutput"]["additionalContext"]
     assert (OTHER, "src/api.py") in holders(store, board)                                    # not stolen
 
 
@@ -121,3 +121,12 @@ def test_session_end_frees_all_files(env, repo, monkeypatch, capsys):
     run("post-tool", edit(repo / "src" / "api.py", repo), monkeypatch, capsys)
     run("session-end", {"session_id": "S1"}, monkeypatch, capsys)
     assert store.claims(board.id) == []
+
+
+def test_files_outside_the_repo_are_not_claimed(env, repo, tmp_path, monkeypatch, capsys):
+    store, board, key = env
+    link(board, monkeypatch, capsys, repo)
+    scratch = tmp_path / "scratchpad" / "tally.py"
+    run("post-tool", edit(scratch, repo), monkeypatch, capsys)
+    run("post-tool", edit(repo / "src" / "api.py", repo), monkeypatch, capsys)
+    assert holders(store, board) == {(ME, "src/api.py")}

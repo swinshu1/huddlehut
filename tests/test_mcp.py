@@ -34,24 +34,28 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
             # no board yet -> helpful error, no crash
             assert (await _call(codex, "post", content="hi")).startswith("error: no board.")
 
-            created = await _call(claude, "create_board", name="parser rewrite", project="repo-x", goal="new parser")
+            created = await _call(claude, "create_board", name="parser rewrite", project="repo-x", goal="new parser",
+                                  nickname="Mochi", model="claude-opus-5-5")
             key = re.search(r"brd_\S+", created).group(0)
+            assert "You're mochi here." in created
             # key is remembered for the session: no need to pass it again
             assert await _call(claude, "post", content="parser; own src/parser/*", kind="status") == "ok #1"
             assert await _call(claude, "post", content="spans on AST nodes?", kind="question") == "ok #2"
 
-            joined = await _call(codex, "join_board", key=key, status="tests in tests/parser")
-            assert "goal: new parser" in joined
-            # "own src/parser/*" went into the inventory and out of the status text
-            assert re.search(r"Now:\n#1 claude-code-\w{4}: parser\n#3 codex-\w{4}: tests in tests/parser", joined)
-            assert re.search(r"Files:\nclaude-code-\w{4}: src/parser/\*", joined)
-            assert re.search(r"Open:\n#2 claude-code-\w{4}/question: spans on AST nodes\?", joined)
+            taken = await _call(codex, "join_board", key=key, nickname="mochi", model="gpt-5-codex")
+            assert "You're " in taken and "'mochi' is taken" in taken     # gets a fallback name, told why
+            joined = await _call(codex, "join_board", key=key, nickname="acorn", status="tests in tests/parser")
+            assert "You're acorn here." in joined and "goal: new parser" in joined
+            # nicknames everywhere; the model shows in the roster only; "own src/parser/*" went into the inventory
+            assert "Now:\n#1 mochi (opus 5.5): parser\n#3 acorn (gpt-5-codex): tests in tests/parser" in joined
+            assert "Files:\nmochi: src/parser/*" in joined
+            assert "Open:\n#2 mochi/question: spans on AST nodes?" in joined
             assert joined.endswith("last_id=3")
 
             # codex answers; claude gets it piggybacked on its next post, without a read call
             assert await _call(codex, "post", content="yes", kind="answer", reply_to=2) == "ok #4"
             res = await _call(claude, "post", content="Pratt parser", kind="decision")
-            assert re.fullmatch(r"ok #5\nNew:\n#3 codex-\w{4}/status: tests in tests/parser\n#4 codex-\w{4}/answer re #2 \(spans on AST nodes\?\): yes", res)
+            assert res == "ok #5\nNew:\n#3 acorn/status: tests in tests/parser\n#4 acorn/answer re #2 (spans on AST nodes?): yes"
             # and nothing is delivered twice, nor its own posts echoed
             assert (await _call(claude, "read_messages")).startswith("(nothing new)")
 
@@ -65,15 +69,15 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
             assert "tests ready" in waited and "Pratt" not in waited
 
             inv = await _call(claude, "files", claim=["src/parser/"])
-            assert re.fullmatch(r"Files:\nclaude-code-\w{4}: src/parser/\*", inv)
+            assert inv == "Files:\nmochi: src/parser/*"
             clash = await _call(codex, "files", claim=["src/parser/lexer.py", "tests/parser/test_lexer.py"])
-            assert re.search(r"not claimed: src/parser/lexer\.py held by claude-code-\w{4}", clash)
-            assert re.search(r"codex-\w{4}: tests/parser/test_lexer\.py", clash)
+            assert "not claimed: src/parser/lexer.py held by mochi" in clash
+            assert "acorn: tests/parser/test_lexer.py" in clash
             assert "src/parser/*" in (await _call(codex, "join_board", key=key))       # inventory in the view
             done = await _call(claude, "files", release=["*"])
-            assert "claude-code" not in done
+            assert "mochi" not in done
             locked = await _call(claude, "files", lock=["src/schema.py"])
-            assert re.search(r"claude-code-\w{4}: src/schema\.py \(locked\)", locked)
+            assert "mochi: src/schema.py (locked)" in locked
             assert "not locked: src/schema.py held by" in await _call(codex, "files", lock=["src/schema.py"])
             assert "(locked)" not in await _call(claude, "files", unlock=["*"])
 

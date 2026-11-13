@@ -16,11 +16,12 @@ from importlib import resources
 from urllib.parse import parse_qs, urlparse
 
 from .compact import presence_tag
-from .store import IDLE_AFTER, BoardError, Message, Store
+from .store import IDLE_AFTER, BoardError, Message, Store, short_id, short_model
 
 
-def _msg(m: Message, snippets: dict[int, str]) -> dict:
-    return {"id": m.id, "author": m.author, "kind": m.kind, "content": m.content, "at": m.created_at,
+def _msg(m: Message, snippets: dict[int, str], names: dict[str, str]) -> dict:
+    return {"id": m.id, "author": m.author, "name": names.get(m.author) or short_id(m.author),
+            "kind": m.kind, "content": m.content, "at": m.created_at,
             "reply_to": m.reply_to, "reply_snippet": snippets.get(m.reply_to) if m.reply_to else None}
 
 
@@ -60,21 +61,24 @@ class Viewer:
             transcript = s.all_messages(b.id) if full else []
             msgs = statuses + open_items + log + transcript
             snippets = s.snippets({m.reply_to for m in msgs if m.reply_to})
-            agents = {a: {"tag": presence_tag(p).strip(" ()"), "state": p["state"], "seen_at": p["seen_at"],
+            names = s.labels(b.id)
+            agents = {a: {"name": names.get(a) or short_id(a), "model": short_model(p.get("model")),
+                          "tag": presence_tag(p).strip(" ()"), "state": p["state"], "seen_at": p["seen_at"],
                           "branch": p.get("branch")} for a, p in seen.items()}
             return {
                 "board": {"id": b.id, "name": b.name, "project": b.project, "goal": b.goal, "status": b.status,
                           "created_at": b.created_at, "closed_at": b.closed_at, "outcome": b.outcome,
                           "distill_status": b.distill_status},
                 "agents": agents,
-                "now": [_msg(m, snippets) for m in statuses],
-                "files": [{"agent": c["agent"], "path": c["path"], "locked": bool(c.get("locked"))} for c in s.claims(b.id)],
-                "open": [_msg(m, snippets) for m in open_items],
+                "now": [_msg(m, snippets, names) for m in statuses],
+                "files": [{"agent": c["agent"], "name": names.get(c["agent"]) or short_id(c["agent"]), "path": c["path"],
+                           "locked": bool(c.get("locked"))} for c in s.claims(b.id)],
+                "open": [_msg(m, snippets, names) for m in open_items],
                 "summary": b.summary,
-                "log": [_msg(m, snippets) for m in log],
+                "log": [_msg(m, snippets, names) for m in log],
                 "hidden_notes": len(hidden),
                 "message_count": s.board_stats().get(b.id, {}).get("messages", 0),
-                "transcript": [_msg(m, snippets) for m in transcript] if full else None,
+                "transcript": [_msg(m, snippets, names) for m in transcript] if full else None,
                 "lessons": s.list_memories(board_id=b.id),
             }
 

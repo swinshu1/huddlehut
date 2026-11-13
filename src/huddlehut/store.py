@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -69,6 +70,39 @@ KIND_ALIASES = {"update": "note", "thinking": "note", "plan": "status", "progres
                 "commitment": "promise", "owe": "promise"}
 IDLE_AFTER = 900  # seconds without activity before an agent shows as idle
 
+CUTE_NAMES = ("mochi", "pebble", "sprout", "biscuit", "dumpling", "noodle", "pickle", "waffle", "acorn", "button",
+              "pudding", "peanut", "clover", "maple", "tofu", "fig", "nugget", "bean", "muffin", "sesame", "truffle",
+              "pumpkin", "marble", "puffin", "otter", "bramble", "cocoa", "juniper", "kiwi", "toffee", "pretzel", "minnow")
+RESERVED_NICKNAMES = {"all", "everyone", "everybody", "agents", "team", "agent", "user", "me", "you",
+                      "codex", "claude", "claude-code"}
+
+
+def short_id(agent: str) -> str:
+    base, _, tag = agent.rpartition("-")
+    return tag if base and re.fullmatch(r"[0-9a-f]{4}", tag) else agent
+
+
+def short_model(model: str | None) -> str:
+    """claude-opus-5-5 -> opus 5.5, claude-sonnet-5-5 -> sonnet 5.5; others as given."""
+    if not model:
+        return ""
+    m = re.sub(r"^(?:anthropic[./])?claude-", "", model.strip().lower())
+    m = re.sub(r"-(\d+)-(\d+)(?:-\d{8})?$", r" \1.\2", m)
+    return re.sub(r"-(\d+)$", r" \1", m) if m != model.lower() else model
+
+
+def default_nickname(agent: str, taken=()) -> str:
+    """A cute name picked from the agent id, skipping names already used on the board."""
+    start = int(hashlib.sha1(agent.encode()).hexdigest(), 16) % len(CUTE_NAMES)
+    for i in range(len(CUTE_NAMES)):
+        name = CUTE_NAMES[(start + i) % len(CUTE_NAMES)]
+        if name not in taken:
+            return name
+    n = 2
+    while f"{CUTE_NAMES[start]}{n}" in taken:
+        n += 1
+    return f"{CUTE_NAMES[start]}{n}"
+
 _BOARD_COLS = """
     id            TEXT PRIMARY KEY,
     key_hash      TEXT NOT NULL UNIQUE,
@@ -107,7 +141,7 @@ CREATE TABLE IF NOT EXISTS cursors (
 );
 CREATE TABLE IF NOT EXISTS presence (
     board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at REAL NOT NULL,
-    state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT,
+    state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT, nickname TEXT, model TEXT,
     PRIMARY KEY (board_id, agent)
 );
 CREATE TABLE IF NOT EXISTS claims (
@@ -150,8 +184,10 @@ POSTGRES_SCHEMA = [
         PRIMARY KEY (board_id, reader))""",
     """CREATE TABLE IF NOT EXISTS presence (
         board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at DOUBLE PRECISION NOT NULL,
-        state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT,
+        state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT, nickname TEXT, model TEXT,
         PRIMARY KEY (board_id, agent))""",
+    "ALTER TABLE presence ADD COLUMN IF NOT EXISTS nickname TEXT",
+    "ALTER TABLE presence ADD COLUMN IF NOT EXISTS model TEXT",
     """CREATE TABLE IF NOT EXISTS claims (
         board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
         since DOUBLE PRECISION NOT NULL, locked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (board_id, toplevel, path))""",
@@ -207,6 +243,8 @@ class _Sqlite:
             ("boards", "compact_error", "compact_error TEXT"),
             ("messages", "reply_to", "reply_to INTEGER"),
             ("claims", "locked", "locked INTEGER NOT NULL DEFAULT 0"),
+            ("presence", "nickname", "nickname TEXT"),
+            ("presence", "model", "model TEXT"),
         ):
             have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in have:
@@ -337,11 +375,11 @@ class Message:
     reply_to: int | None = None
 
 
-def fmt_message(m: Message, context: str = "") -> str:
-    """One line per message; `note` is the unmarked default kind."""
+def fmt_message(m: Message, context: str = "", name: str | None = None) -> str:
+    """One line per message; `note` is the unmarked default kind. name: the author's nickname."""
     kind = "" if m.kind == "note" else "/" + m.kind
     reply = f" re #{m.reply_to}" + (f" ({context})" if context else "") if m.reply_to else ""
-    return f"#{m.id} {m.author}{kind}{reply}: {m.content}"
+    return f"#{m.id} {name or m.author}{kind}{reply}: {m.content}"
 
 
 def fmt_messages(msgs: list[Message]) -> str:
@@ -666,6 +704,46 @@ class Store:
         cutoff = time.time() - IDLE_AFTER
         return {a: p for a, p in self.presence(board_id).items()
                 if p["state"] == "active" and p["seen_at"] >= cutoff and a != exclude}
+
+    # ---- nicknames ----------------------------------------------------------
+    # Agents pick a cute one-word name when they join. The id (claude-code-3f2a) stays the key
+    # for cursors, claims and hooks; the nickname is what everyone reads and @mentions.
+
+    def nicknames(self, board_id: str) -> dict[str, str]:
+        return {r["agent"]: r["nickname"] for r in self._all(
+            "SELECT agent, nickname FROM presence WHERE board_id=? AND nickname IS NOT NULL", (board_id,))}
+
+    def set_nickname(self, board_id: str, agent: str, wanted: str | None = None) -> tuple[str, str | None]:
+        """Give an agent a nickname on a board. Returns (nickname, why the wanted one wasn't used)."""
+        current = self.nicknames(board_id)
+        taken = {n for a, n in current.items() if a != agent}
+        why = None
+        nick = re.sub(r"[^a-z0-9-]", "", (wanted or "").strip().lower().replace(" ", "-"))[:16].strip("-")
+        if wanted is not None and wanted.strip():
+            if not re.fullmatch(r"[a-z][a-z0-9-]{1,15}", nick) or nick in RESERVED_NICKNAMES:
+                why, nick = f"'{wanted.strip()}' isn't usable (one short word, letters first)", ""
+            elif nick in taken:
+                why, nick = f"'{nick}' is taken", ""
+        if not nick:
+            nick = current.get(agent) if current.get(agent) and current[agent] not in taken else ""
+        if not nick:
+            nick = default_nickname(agent, taken)
+        self.touch(board_id, agent)
+        self.db.execute("UPDATE presence SET nickname=? WHERE board_id=? AND agent=?", (nick, board_id, agent))
+        return nick, why
+
+    def set_model(self, board_id: str, agent: str, model: str) -> None:
+        model = re.sub(r"[^\w.\-/: ]", "", model.strip())[:48]
+        if model:
+            self.touch(board_id, agent)
+            self.db.execute("UPDATE presence SET model=? WHERE board_id=? AND agent=?", (model, board_id, agent))
+
+    def labels(self, board_id: str) -> dict[str, str]:
+        """Display name per agent: its nickname, else its 4-char tag."""
+        names = self.nicknames(board_id)
+        authors = {r["author"] for r in self._all("SELECT DISTINCT author FROM messages WHERE board_id=?", (board_id,))}
+        holders = {c["agent"] for c in self.claims(board_id)}
+        return {a: names.get(a) or short_id(a) for a in {*names, *self.presence(board_id), *authors, *holders}}
 
     # ---- file inventory (who is working on which files) --------------------
 
