@@ -138,7 +138,10 @@ function ago(t) {
   const s = Date.now() / 1000 - t;
   return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
 }
-const clock = t => new Date(t * 1000).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+const clock = t => {
+  const d = new Date(t * 1000), time = d.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], {month: "short", day: "numeric"})}, ${time}`;
+};
 const day = t => new Date(t * 1000).toLocaleDateString([], {month: "short", day: "numeric"});
 const PATH = /(?<![\w\/.:@-])((?:[\w.-]+\/)+(?:[\w.*-]*[\w*])?|[\w-]+\.(?:py|pyi|ts|tsx|js|jsx|mjs|md|json|toml|ya?ml|sql|sh|go|rs|css|html|txt))(?![\w\/])/g;
 const COMMIT = /^committed ([0-9a-f]{7,40}) \(([^)]+)\): /;
@@ -184,9 +187,10 @@ function side(route) {
   route.view === "memory" ? $("#mem-link").setAttribute("aria-current", "page") : $("#mem-link").removeAttribute("aria-current");
 }
 
-function logList(ms) {
-  return `<ol class="log">${ms.map((m, i) => {
-    const p = ms[i - 1], same = p && p.author === m.author && m.at - p.at < 300;
+function logList(ms) {  // newest first; a run of posts by one agent shows its pill once, on the newest
+  const list = [...ms].reverse();
+  return `<ol class="log">${list.map((m, i) => {
+    const p = list[i - 1], same = p && p.author === m.author && p.at - m.at < 300;
     const verb = VERB[m.kind] && m.kind !== "status" ? `<span class="dim">${VERB[m.kind]}</span> ` : "";
     const re = m.reply_to ? `<div class="re">re <a class="ref" href="#" data-ref="${m.reply_to}">#${m.reply_to}</a>${m.reply_snippet ? `: ${esc(m.reply_snippet)}` : ""}</div>` : "";
     return `<li id="m${m.id}" class="${same ? "same" : ""}">${who(m.author, m.name)}<div>${re}<span class="text">${verb}${fmt(m.content)}</span></div><time>${clock(m.at)}</time></li>`;
@@ -201,7 +205,7 @@ function board(d) {
   const ag = a => d.agents[a] || {};
   const away = a => [ag(a).model, ag(a).tag].filter(Boolean).map(t => `<span class="away">${esc(t)}</span>`).join("");
   const now = d.now.length
-    ? `<ul class="rows">${d.now.map(m => `<li><div>${who(m.author, m.name)}${away(m.author)}</div><div>${long(m.content, "s" + m.id)}</div></li>`).join("")}</ul>`
+    ? `<ul class="rows">${[...d.now].reverse().map(m => `<li><div>${who(m.author, m.name)}${away(m.author)}</div><div>${long(m.content, "s" + m.id)}</div></li>`).join("")}</ul>`
     : '<p class="dim">nobody has posted a status yet.</p>';
   const by = {};
   for (const f of d.files) (by[f.agent] ||= []).push(f);
@@ -210,10 +214,10 @@ function board(d) {
     ? `<section><h2>files</h2><ul class="rows">${Object.entries(by).map(([a, fs]) => `<li><div>${who(a, nameOf(a))}</div><div>${fs.map(f =>
         `<div class="path">${esc(f.path)}${f.locked ? '<span class="lock">locked</span>' : ""}</div>`).join("")}</div></li>`).join("")}</ul></section>` : "";
   const attn = d.open.length
-    ? `<section><h2>needs an answer</h2><ul class="rows">${d.open.map(m => `<li><div>${who(m.author, m.name)}</div><div class="attn"><span class="dim">${VERB[m.kind]}</span> <span class="text">${fmt(m.content)}</span></div></li>`).join("")}</ul></section>` : "";
+    ? `<section><h2>needs an answer</h2><ul class="rows">${[...d.open].reverse().map(m => `<li><div>${who(m.author, m.name)}</div><div class="attn"><span class="dim">${VERB[m.kind]}</span> <span class="text">${fmt(m.content)}</span></div></li>`).join("")}</ul></section>` : "";
   const summary = d.summary ? `<section><h2>earlier</h2><p class="goal" style="white-space:pre-wrap;margin:0">${esc(d.summary)}</p></section>` : "";
   const logs = d.log.length ? `<section><h2>decisions and results</h2>${logList(d.log)}</section>` : "";
-  const transcript = full && d.transcript ? `<section><h2>transcript</h2>${logList(d.transcript)}</section>` : "";
+  const transcript = full && d.transcript ? `<section><h2>transcript, newest first</h2>${logList(d.transcript)}</section>` : "";
   const toggle = `<div><button class="link" id="toggle">${full ? "hide transcript" : `show transcript (${d.message_count})`}</button></div>`;
   const lessons = d.lessons.length ? `<section><h2>lessons</h2>${lessonList(d.lessons, false)}</section>` : "";
   const outcome = b.status !== "open" && b.outcome ? `<p class="goal dim">outcome: ${esc(b.outcome)}</p>` : "";
