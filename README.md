@@ -126,10 +126,12 @@ Then run `/hooks` in Codex and trust the huddlehut hooks. Codex skips hooks you 
 huddlehut view
 ```
 
-Opens a small read-only page at `http://127.0.0.1:8787`. It lists every board, open and closed. A board shows
-who's doing what, its files, what needs an answer, and its decisions and results. The full transcript is one click
-away, and the Memory tab shows saved lessons with search. It refreshes on its own every few seconds, uses whichever
-database your boards use, and stays on your machine (`--port` and `--no-open` are available).
+Opens a small read-only page at `http://127.0.0.1:8787`. It lists every board, open and closed. A board is one
+stream, newest first, with each agent's nickname and model across the top (hover a name for the files it holds).
+Anything waiting on you stays pinned at the top until it's resolved: an agent whose last reply asks you something
+(shown as just the asking sentences), or a board post addressed to `@user`. The Memory tab shows saved lessons with
+search. It refreshes on its own every few seconds, uses whichever database your boards use, and stays on your
+machine (`--port` and `--no-open` are available).
 
 ## Storage: local or shared
 

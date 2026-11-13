@@ -77,6 +77,32 @@ RESERVED_NICKNAMES = {"all", "everyone", "everybody", "agents", "team", "agent",
                       "codex", "claude", "claude-code"}
 
 
+ASKS_USER = re.compile(
+    r"\b(?:waiting (?:on|for) (?:you|your)|your call\b|(?:need|awaiting|want|waiting for) your (?:answer|go-ahead|ok|decision)|"
+    r"let me know|when you(?:'re| are) ready|"
+    r"up to you|should i\b|want me to\b|do you want\b|would you like\b|which (?:one|option|do you)\b|"
+    r"(?:just )?say [\"“'][^\"”']{1,30}[\"”']|^\W*say \w+|when you (?:want|need|decide|get a chance))",
+    re.I,
+)
+
+
+def ask_tail(reply: str, limit: int = 500) -> str:
+    """The part of a reply that asks the user something: its last paragraph (with the one before it
+    when the last is very short), trimmed at a sentence boundary rather than mid-word."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", reply.strip()) if p.strip()]
+    tail = paras[-1] if paras else reply.strip()
+    if len(tail) < 80 and len(paras) > 1 and len(paras[-2]) <= 240:  # short ask: add a short lead-in
+        tail = paras[-2] + "\n\n" + tail
+    if len(tail) > limit:
+        cut = tail[-limit:]
+        m = re.search(r"(?<=[.!?:])\s+", cut)
+        tail = cut[m.end():] if m and m.end() < len(cut) // 2 else "…" + cut.split(" ", 1)[-1]
+    # keep just the sentences that ask; the context around them is for the session, not the pin
+    sentences = re.split(r"(?<=[.!?])\s+", tail.replace("\n", " "))
+    asks = [x for x in sentences if x.rstrip(" *_`").endswith("?") or ASKS_USER.search(x)]
+    return " ".join(asks) if asks else tail
+
+
 def short_id(agent: str) -> str:
     base, _, tag = agent.rpartition("-")
     return tag if base and re.fullmatch(r"[0-9a-f]{4}", tag) else agent
@@ -142,6 +168,7 @@ CREATE TABLE IF NOT EXISTS cursors (
 CREATE TABLE IF NOT EXISTS presence (
     board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at REAL NOT NULL,
     state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT, nickname TEXT, model TEXT,
+    waiting TEXT, waiting_at REAL,
     PRIMARY KEY (board_id, agent)
 );
 CREATE TABLE IF NOT EXISTS claims (
@@ -185,7 +212,10 @@ POSTGRES_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS presence (
         board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at DOUBLE PRECISION NOT NULL,
         state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT, nickname TEXT, model TEXT,
+        waiting TEXT, waiting_at DOUBLE PRECISION,
         PRIMARY KEY (board_id, agent))""",
+    "ALTER TABLE presence ADD COLUMN IF NOT EXISTS waiting TEXT",
+    "ALTER TABLE presence ADD COLUMN IF NOT EXISTS waiting_at DOUBLE PRECISION",
     "ALTER TABLE presence ADD COLUMN IF NOT EXISTS nickname TEXT",
     "ALTER TABLE presence ADD COLUMN IF NOT EXISTS model TEXT",
     """CREATE TABLE IF NOT EXISTS claims (
@@ -245,6 +275,8 @@ class _Sqlite:
             ("claims", "locked", "locked INTEGER NOT NULL DEFAULT 0"),
             ("presence", "nickname", "nickname TEXT"),
             ("presence", "model", "model TEXT"),
+            ("presence", "waiting", "waiting TEXT"),
+            ("presence", "waiting_at", "waiting_at REAL"),
         ):
             have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in have:
@@ -731,6 +763,16 @@ class Store:
         self.touch(board_id, agent)
         self.db.execute("UPDATE presence SET nickname=? WHERE board_id=? AND agent=?", (nick, board_id, agent))
         return nick, why
+
+    def set_waiting(self, board_id: str, agent: str, question: str | None) -> None:
+        """Record that an agent's session is waiting on the user (its last reply, trimmed), or clear it."""
+        if question:
+            self.touch(board_id, agent)
+            self.db.execute("UPDATE presence SET waiting=?, waiting_at=? WHERE board_id=? AND agent=?",
+                            (ask_tail(question), time.time(), board_id, agent))
+        else:
+            self.db.execute("UPDATE presence SET waiting=NULL, waiting_at=NULL WHERE board_id=? AND agent=?"
+                            " AND waiting IS NOT NULL", (board_id, agent))
 
     def set_model(self, board_id: str, agent: str, model: str) -> None:
         model = re.sub(r"[^\w.\-/: ]", "", model.strip())[:48]

@@ -267,19 +267,13 @@ def _take_unread(store, state: dict):
 
 # An agent whose last reply waits on the user can't act on board traffic anyway; holding it from
 # stopping or waking it would just make it chat in the user's window. Its next turn gets the news.
-_ASKS_USER = re.compile(
-    r"\b(?:waiting (?:on|for) (?:you|your)|your (?:call|answer|go-ahead|decision)|let me know|when you(?:'re| are) ready|"
-    r"up to you|should i\b|want me to\b|do you want\b|would you like\b|which (?:one|option|do you)\b|"
-    r"(?:just )?say [\"“'][^\"”']{1,30}[\"”'])",
-    re.I,
-)
-
-
 def awaiting_user(last_reply: str | None) -> bool:
     if not last_reply:
         return False
     tail = re.sub(r"[\s*_`>)\].]+$", "", last_reply.strip()[-400:])
-    return tail.endswith("?") or bool(_ASKS_USER.search(tail))
+    from .store import ASKS_USER
+
+    return tail.endswith("?") or bool(ASKS_USER.search(tail))
 
 
 def _store():
@@ -359,6 +353,7 @@ def post_tool(inp: dict, client: str) -> dict | None:
 
     info = _git_info(state, cwd)
     store.touch(board.id, state["me"], cwd, info.get("toplevel"), info.get("branch"))
+    store.set_waiting(board.id, state["me"], None)  # working again: whatever it waited on was answered
     if board.status == "open" and not store.nicknames(board.id).get(state["me"]):
         # sessions that joined before nicknames existed: give them one and say so, once
         nick, _ = store.set_nickname(board.id, state["me"])
@@ -499,13 +494,17 @@ def session_start(inp: dict, client: str) -> dict | None:
 def stop(inp: dict, client: str) -> dict | None:
     if inp.get("stop_hook_active"):
         return None  # already continued once for this stop; don't loop
-    if awaiting_user(inp.get("last_assistant_message")):
-        return None  # waiting on the user: let it stop; board news arrives on its next turn
     sid = inp.get("session_id") or ""
     state = load(sid)
     if not state:
         return None
     store = _store()
+    last = inp.get("last_assistant_message")
+    if awaiting_user(last):
+        # waiting on the user: pin it in the viewer, let it stop; board news arrives on its next turn
+        store.set_waiting(state["board"], state["me"], last)
+        return None
+    store.set_waiting(state["board"], state["me"], None)
     msgs = store.unread(state["board"], state["me"])
     urgent = _needs_me(store, state["board"], state["me"], msgs)
     reminded = set(state.get("reminded", []))
@@ -537,6 +536,7 @@ def session_end(inp: dict, client: str) -> dict | None:
         return None
     store = _store()
     store.mark_left(state["board"], state["me"])
+    store.set_waiting(state["board"], state["me"], None)
     store.release(state["board"], state["me"], ["*"])  # gone: its files are free
     board = store.get_board(state["board"])
     promises = _open_promises(store, board.id, state["me"]) if board.status == "open" else []
