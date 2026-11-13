@@ -28,7 +28,7 @@ def run(event, payload, monkeypatch, capsys, client="claude"):
 
 def link(board, monkeypatch, capsys, sid="S1", me="claude-code-aaaa"):
     resp = [{"type": "text", "text": f"[{board.id} you={me}]\nparser [repo]\nlast_id=0"}]
-    return run("post-tool", {"session_id": sid, "tool_name": "mcp__plugin_huddlehut_huddlehut__join_board",
+    return run("post-tool", {"session_id": sid, "tool_name": "mcp__plugin_huddlehut_board__join_board",
                              "tool_response": resp}, monkeypatch, capsys)
 
 
