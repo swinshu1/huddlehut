@@ -14,7 +14,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .store import Board, Message, Store, env, fmt_message
+import time
+
+from .store import IDLE_AFTER, Board, Message, Store, env, fmt_message
 
 MODEL = os.environ.get("HUDDLEHUT_COMPACT_MODEL", os.environ.get("HUDDLEHUT_MODEL", "claude-opus-5-5"))
 COMPACT_AFTER_CHARS = int(os.environ.get("HUDDLEHUT_COMPACT_AFTER_CHARS", "6000"))  # ~1.5K tokens
@@ -99,10 +101,27 @@ def compact(store: Store, board_id: str, client=None, force: bool = False) -> bo
         raise
 
 
+def _age(seconds: float) -> str:
+    return f"{int(seconds // 60)}m" if seconds < 5400 else f"{int(seconds // 3600)}h"
+
+
+def presence_tag(p: dict | None, now: float | None = None) -> str:
+    """' (left 5m)' / ' (idle 40m)' / '' so readers know whether an owner is still around."""
+    if not p:
+        return ""
+    now = now or time.time()
+    if p["state"] == "left":
+        return f" (left {_age(now - p['seen_at'])})"
+    if now - p["seen_at"] > IDLE_AFTER:
+        return f" (idle {_age(now - p['seen_at'])})"
+    return ""
+
+
 def render_view(store: Store, board: Board) -> tuple[str, int]:
     """The joiner's view and the board's newest message id."""
     statuses = store.current_statuses(board.id)
     open_items = store.open_items(board.id)
+    seen = store.presence(board.id)
     log = store.log_after(board.id, board.summary_through)
 
     note_ids = [m.id for m in log if m.kind == "note"]
@@ -114,9 +133,17 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
     head = f"{board.name} [{board.project}]" + ("" if board.status == "open" else f" ({board.status})")
     parts = [head + (f" goal: {board.goal}" if board.goal else "")]
     if statuses:
-        parts.append("Now:\n" + "\n".join(f"#{m.id} {m.author}: {m.content}" for m in statuses))
+        parts.append("Now:\n" + "\n".join(
+            f"#{m.id} {m.author}{presence_tag(seen.get(m.author))}: {m.content}" for m in statuses))
     if open_items:
-        parts.append("Open:\n" + render_entries(store, open_items))
+        lines = render_entries(store, open_items).split("\n")
+        # flag open promises whose author is gone: someone else has to pick them up
+        lines = [
+            ln.replace(f" {m.author}/", f" {m.author}{presence_tag(seen.get(m.author))}/", 1)
+            if m.kind == "promise" else ln
+            for ln, m in zip(lines, open_items)
+        ]
+        parts.append("Open:\n" + "\n".join(lines))
     if board.summary:
         parts.append("Earlier:\n" + board.summary)
     if log:

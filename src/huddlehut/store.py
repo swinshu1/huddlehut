@@ -55,16 +55,19 @@ def is_postgres(url: str) -> bool:
 MAX_POST_CHARS = 1000
 # Each kind has a lifecycle that lets the board summarize itself without a model call:
 #   status    one live slot per agent; a new status replaces the old one in views
-#   question, blocker   shown until any message replies to them (reply_to)
+#   question, blocker, promise   shown until any message replies to them (reply_to);
+#             a promise is something the author owes others ("will post when X is rebuilt")
 #   decision, result, deadend, answer   durable: kept (and eventually summarized)
 #   note      chatter: only the newest few are shown
-MESSAGE_KINDS = ("status", "decision", "question", "answer", "blocker", "result", "deadend", "note")
-OPEN_KINDS = ("question", "blocker")
+MESSAGE_KINDS = ("status", "decision", "question", "answer", "blocker", "promise", "result", "deadend", "note")
+OPEN_KINDS = ("question", "blocker", "promise")
 DURABLE_KINDS = ("decision", "result", "deadend", "answer")
 # Agents guess kind names; mapping beats an error round trip (which costs a whole extra turn).
 KIND_ALIASES = {"update": "note", "thinking": "note", "plan": "status", "progress": "status",
                 "handoff": "note", "info": "note", "done": "result", "dead_end": "deadend",
-                "failed": "deadend", "reply": "answer"}
+                "failed": "deadend", "reply": "answer", "todo": "promise", "will": "promise",
+                "commitment": "promise", "owe": "promise"}
+IDLE_AFTER = 900  # seconds without activity before an agent shows as idle
 
 _BOARD_COLS = """
     id            TEXT PRIMARY KEY,
@@ -102,6 +105,11 @@ CREATE TABLE IF NOT EXISTS cursors (
     board_id TEXT NOT NULL, reader TEXT NOT NULL, last_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (board_id, reader)
 );
+CREATE TABLE IF NOT EXISTS presence (
+    board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at REAL NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT,
+    PRIMARY KEY (board_id, agent)
+);
 CREATE TABLE IF NOT EXISTS memories (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     board_id      TEXT NOT NULL REFERENCES boards(id),
@@ -136,6 +144,10 @@ POSTGRES_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS cursors (
         board_id TEXT NOT NULL, reader TEXT NOT NULL, last_id BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (board_id, reader))""",
+    """CREATE TABLE IF NOT EXISTS presence (
+        board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at DOUBLE PRECISION NOT NULL,
+        state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT,
+        PRIMARY KEY (board_id, agent))""",
     """CREATE TABLE IF NOT EXISTS memories (
         id BIGSERIAL PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), project TEXT NOT NULL,
         title TEXT NOT NULL, technique TEXT NOT NULL, when_to_apply TEXT NOT NULL,
@@ -440,7 +452,13 @@ class Store:
     # ---- messages ---------------------------------------------------------
 
     def post(self, key: str, author: str, content: str, kind: str = "note", reply_to: int | None = None) -> Message:
-        board = self.board_for_key(key)
+        return self.post_to(self.board_for_key(key), author, content, kind, reply_to)
+
+    def post_to(self, board: Board | str, author: str, content: str, kind: str = "note",
+                reply_to: int | None = None) -> Message:
+        """Post to a board you already resolved (hooks know the board id, not the key)."""
+        if isinstance(board, str):
+            board = self.get_board(board)
         if board.status != "open":
             raise BoardError(f"board {board.id} is closed; it is read-only")
         kind = KIND_ALIASES.get(kind.strip().lower(), kind.strip().lower())
@@ -482,7 +500,7 @@ class Store:
     def open_items(self, board_id: str) -> list[Message]:
         """Questions and blockers nobody has replied to yet."""
         rows = self._all(
-            "SELECT * FROM messages m WHERE board_id=? AND kind IN ('question','blocker')"
+            "SELECT * FROM messages m WHERE board_id=? AND kind IN ('question','blocker','promise')"
             " AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id) ORDER BY id",
             (board_id,),
         )
@@ -493,7 +511,7 @@ class Store:
         items are shown live from the whole board instead)."""
         rows = self._all(
             "SELECT * FROM messages m WHERE board_id=? AND id>? AND (kind IN ('decision','result','deadend','answer','note')"
-            " OR (kind IN ('question','blocker') AND EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id)))"
+            " OR (kind IN ('question','blocker','promise') AND EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id)))"
             " ORDER BY id",
             (board_id, after_id),
         )
@@ -550,6 +568,38 @@ class Store:
             (board_id, cursor, reader, limit),
         )
         return [_message(r) for r in rows]
+
+    # ---- presence (who is around, and where they work) --------------------
+
+    def touch(self, board_id: str, agent: str, cwd: str | None = None, toplevel: str | None = None,
+              branch: str | None = None) -> None:
+        """Record activity. The MCP server doesn't know the agent's working folder, so missing
+        fields keep their last known value (hooks fill them in)."""
+        self.db.execute(
+            "INSERT INTO presence (board_id, agent, seen_at, state, cwd, toplevel, branch)"
+            " VALUES (?, ?, ?, 'active', ?, ?, ?) ON CONFLICT (board_id, agent) DO UPDATE SET"
+            " seen_at = excluded.seen_at, state = 'active',"
+            " cwd = COALESCE(excluded.cwd, presence.cwd),"
+            " toplevel = COALESCE(excluded.toplevel, presence.toplevel),"
+            " branch = COALESCE(excluded.branch, presence.branch)",
+            (board_id, agent, time.time(), cwd, toplevel, branch),
+        )
+
+    def mark_left(self, board_id: str, agent: str) -> None:
+        self.db.execute(
+            "INSERT INTO presence (board_id, agent, seen_at, state) VALUES (?, ?, ?, 'left')"
+            " ON CONFLICT (board_id, agent) DO UPDATE SET state = 'left', seen_at = excluded.seen_at",
+            (board_id, agent, time.time()),
+        )
+
+    def presence(self, board_id: str) -> dict[str, dict]:
+        return {r["agent"]: dict(r) for r in self._all("SELECT * FROM presence WHERE board_id=?", (board_id,))}
+
+    def live_agents(self, board_id: str, exclude: str | None = None) -> dict[str, dict]:
+        """Agents active within IDLE_AFTER seconds that haven't left."""
+        cutoff = time.time() - IDLE_AFTER
+        return {a: p for a, p in self.presence(board_id).items()
+                if p["state"] == "active" and p["seen_at"] >= cutoff and a != exclude}
 
     # ---- memories ---------------------------------------------------------
 

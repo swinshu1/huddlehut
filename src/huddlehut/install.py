@@ -44,17 +44,20 @@ def codex_hooks_config(existing: dict) -> dict:
     cfg = dict(existing or {})
     hooks = cfg.setdefault("hooks", {})
     ours = {
-        "PostToolUse": [{"type": "command", "command": f'"{HOOK}" post-tool --client codex', "timeout": 15}],
-        "SessionStart": [{"type": "command", "command": f'"{HOOK}" session-start --client codex', "timeout": 15}],
-        "Stop": [{"type": "command", "command": f'"{HOOK}" stop --client codex', "timeout": 15}],
+        "PreToolUse": ("Bash", [{"type": "command", "command": f'"{HOOK}" pre-tool --client codex', "timeout": 10}]),
+        "PostToolUse": (None, [{"type": "command", "command": f'"{HOOK}" post-tool --client codex', "timeout": 15}]),
+        "SessionStart": (None, [{"type": "command", "command": f'"{HOOK}" session-start --client codex', "timeout": 15}]),
+        "Stop": (None, [{"type": "command", "command": f'"{HOOK}" stop --client codex', "timeout": 15}]),
+        # Codex allows SessionEnd hooks at most 3 seconds
+        "SessionEnd": (None, [{"type": "command", "command": f'"{HOOK}" session-end --client codex', "timeout": 3}]),
     }
-    for event, handlers in ours.items():
+    for event, (matcher, handlers) in ours.items():
         groups = [
             g for g in hooks.get(event, [])
             if not any("huddlehut" in h.get("command", "") or str(HOOK) in h.get("command", "")
                        for h in g.get("hooks", []))
         ]
-        groups.append({"hooks": handlers})
+        groups.append({"matcher": matcher, "hooks": handlers} if matcher else {"hooks": handlers})
         hooks[event] = groups
     return cfg
 
@@ -66,7 +69,7 @@ def install_codex(dry_run: bool = False) -> list[str]:
     steps.append(" ".join(mcp))
     existing = json.loads(CODEX_HOOKS.read_text()) if CODEX_HOOKS.exists() else {}
     merged = codex_hooks_config(existing)
-    steps.append(f"write {CODEX_HOOKS} (huddlehut PostToolUse, SessionStart, Stop hooks)")
+    steps.append(f"write {CODEX_HOOKS} (huddlehut PreToolUse, PostToolUse, SessionStart, Stop, SessionEnd hooks)")
     if not dry_run:
         if not shutil.which("codex"):
             raise RuntimeError("codex CLI not found on PATH")

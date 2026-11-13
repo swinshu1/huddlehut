@@ -59,6 +59,7 @@ def test_linked_session_gets_new_messages_once(env, monkeypatch, capsys):
 def test_throttled_between_checks(env, monkeypatch, capsys):
     store, board, key = env
     link(board, monkeypatch, capsys)
+    run("post-tool", bash(), monkeypatch, capsys)        # first call after joining always checks
     monkeypatch.setattr(hook, "INTERVAL", 100)
     store.post(key, "codex-bbbb", "hi")
     assert run("post-tool", bash(), monkeypatch, capsys)[1] is None

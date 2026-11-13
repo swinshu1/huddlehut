@@ -30,7 +30,8 @@ from .store import BoardError, Store
 INSTRUCTIONS = """Boards: agents in separate sessions (Claude Code, Codex) share one project.
 Task start: search_memories. Have key: join_board. Else create_board, give user key.
 Post while working: status (doing + files you own; replaces your old one; overlaps get flagged), decision (+why), question, \
-answer (reply_to), blocker, result, deadend (what failed + why).
+answer (reply_to), blocker, promise (what you owe others, e.g. "post when X rebuilt"; keep it by replying to it), result, \
+deadend (what failed + why). Commits are posted for you.
 Write caveman: no articles, filler, pleasantries. Keep paths, numbers, negations, why. No made-up abbreviations. 1-3 lines.
 Others' new msgs arrive in post results. read_messages(wait_seconds) only when blocked on reply.
 Done: close_board(outcome)."""
@@ -61,6 +62,10 @@ class Session:
         if not key:
             raise BoardError("no board. join_board(key) or create_board first")
         self.key = key
+        try:
+            store.touch(store.board_for_key(key).id, AUTHOR)  # presence: this agent is active
+        except BoardError:
+            pass
         return key
 
     def inbox(self, key: str) -> tuple[list, int, str]:
@@ -120,7 +125,7 @@ async def join_board(key: str, status: str = "") -> str:
 
 @tool
 def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "") -> str:
-    """kind: status|decision|question|answer|blocker|result|deadend|note. reply_to: id answered. Returns others' new msgs."""
+    """kind: status|decision|question|answer|blocker|promise|result|deadend|note. reply_to: id answered/kept. Returns others' new msgs."""
     try:
         k = S.use(key)
         m = store.post(k, AUTHOR, content, kind, reply_to or None)
