@@ -59,3 +59,15 @@ def test_codex_hook_reports_model(env, repo, monkeypatch, capsys):
     run("post-tool", {"session_id": "S1", "cwd": str(repo), "tool_name": "Bash", "model": "gpt-5-codex",
                       "tool_input": {"command": "ls"}, "tool_response": {}}, monkeypatch, capsys)
     assert store.presence(board.id)[ME]["model"] == "gpt-5-codex"
+
+
+def test_unnamed_session_gets_a_nickname_from_its_hooks(env, repo, monkeypatch, capsys):
+    store, board, key = env
+    link(board, monkeypatch, capsys, repo)
+    out = run("post-tool", {"session_id": "S1", "cwd": str(repo), "tool_name": "Bash",
+                            "tool_input": {"command": "ls"}, "tool_response": {}}, monkeypatch, capsys)
+    nick = store.nicknames(board.id)[ME]
+    assert f"you're {nick} on this board now" in out["hookSpecificOutput"]["additionalContext"]
+    again = run("post-tool", {"session_id": "S1", "cwd": str(repo), "tool_name": "Bash",
+                              "tool_input": {"command": "ls"}, "tool_response": {}}, monkeypatch, capsys)
+    assert again is None                                        # told once
