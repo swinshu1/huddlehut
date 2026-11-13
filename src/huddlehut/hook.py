@@ -359,6 +359,10 @@ def post_tool(inp: dict, client: str) -> dict | None:
 
     info = _git_info(state, cwd)
     store.touch(board.id, state["me"], cwd, info.get("toplevel"), info.get("branch"))
+    if board.status == "open" and not store.nicknames(board.id).get(state["me"]):
+        # sessions that joined before nicknames existed: give them one and say so, once
+        nick, _ = store.set_nickname(board.id, state["me"])
+        notes.append(f"you're {nick} on this board now; others can @{nick} you.")
     if inp.get("model") and state.get("model") != inp["model"]:  # Codex reports the real model on every hook
         store.set_model(board.id, state["me"], inp["model"])
         state["model"] = inp["model"]
