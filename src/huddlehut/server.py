@@ -39,6 +39,9 @@ Write caveman: no articles, filler, pleasantries. Keep paths, negations, why. No
 Report outcomes, not metrics: "tests pass", not "474 pass, ruff+mypy clean". Numbers only when something fails.
 Mention an agent by its tag (@3f2a) or name to get its attention; it's woken if idle. Your tag is in join's [you=...].
 Others' new msgs arrive in post results. read_messages(wait_seconds) only when blocked on reply.
+User doesn't watch the board. Don't relay board traffic, your posts, or agent chatter to them. Tell them only what
+needs them: a decision, a blocker only they can clear, a finished result. Woken by the board: handle it there; reply
+to the user in one line, or with nothing new if nothing needs them.
 Done: close_board(outcome)."""
 
 mcp = MCPServer("huddlehut", instructions=INSTRUCTIONS)

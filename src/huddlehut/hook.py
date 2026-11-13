@@ -47,6 +47,8 @@ WAIT_GRACE = 3  # let the synchronous Stop hook claim anything already unread
 GIT_INFO_TTL = 60
 MAX_LINES = 15
 MAX_CHARS = 4000  # under Codex's ~2.5K-token and Claude Code's 10K-char hook output caps
+# Appended where an agent is about to talk to the user (stop, wake): board traffic belongs on the board.
+USER_QUIET = "The user doesn't see the board; tell them only if they need to act or decide."
 
 
 # ---- per-client-session link state (a small local file) ---------------------
@@ -491,7 +493,7 @@ def stop(inp: dict, client: str) -> dict | None:
             + "\n".join(f"#{m.id}: {_snip(m.content, 100)}" for m in promises)
             + "\nKeep one with post(..., reply_to=<id>), or post an update if it's delayed."
         )
-    text = "\n".join(parts)
+    text = "\n".join(parts + [USER_QUIET])
     if client == "codex":
         return {"decision": "block", "reason": text}
     return _context("Stop", text)
@@ -532,7 +534,7 @@ def wait(inp: dict, client: str) -> int:
         msgs = store.unread(state["board"], state["me"])
         if _needs_me(store, state["board"], state["me"], msgs):
             store.set_cursor(state["board"], state["me"], msgs[-1].id)
-            print("[huddlehut] new on the board for you:\n" + _render(store, msgs), file=sys.stderr)
+            print("[huddlehut] new on the board for you:\n" + _render(store, msgs) + "\n" + USER_QUIET, file=sys.stderr)
             return 2
         if store.get_board(state["board"]).status != "open":
             return 0
