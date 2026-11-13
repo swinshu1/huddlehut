@@ -87,7 +87,17 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("client", choices=("claude", "codex"))
     ins.add_argument("--dry-run", action="store_true", help="print what would change")
 
+    v = sub.add_parser("view", help="open the board viewer in your browser (boards, transcripts, memory)")
+    v.add_argument("--port", type=int, default=8787)
+    v.add_argument("--host", default="127.0.0.1", help="keep the default unless you mean to share it")
+    v.add_argument("--no-open", action="store_true", help="don't open a browser")
+
     a = p.parse_args(argv)
+    if a.cmd == "view":
+        from .viewer import serve
+
+        serve(a.host, a.port, open_browser=not a.no_open)
+        return 0
     if a.cmd in ("config", "install"):
         from . import install
 
