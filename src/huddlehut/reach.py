@@ -17,14 +17,15 @@ from __future__ import annotations
 import time
 
 from .mentions import mention_names, needs, tags
-from .store import USER
+from .store import SERVER_LEVEL, USER
 
 WORKING_WITHIN = 120
 STUCK_AFTER = 600
 
 
 def reach_of(store, board_id: str, agent: str, p: dict, now: float | None = None) -> dict:
-    """{"status", "linked", "waiting" (how many messages need it), "since" (the oldest one's time)}."""
+    """{"status", "linked", "waiting" (how many messages need it), "since" (the oldest one's time),
+    "current" (its board server runs the current feature level; else restarting its session updates it)}."""
     now = now or time.time()
     waiting = needs(store, board_id, agent, store.unread(board_id, agent))
     since = waiting[0].created_at if waiting else None
@@ -37,7 +38,8 @@ def reach_of(store, board_id: str, agent: str, p: dict, now: float | None = None
         status = "unlinked"
     else:
         status = "idle"
-    return {"status": status, "linked": linked, "waiting": len(waiting), "since": since}
+    return {"status": status, "linked": linked, "waiting": len(waiting), "since": since,
+            "current": (p.get("level") or 0) >= SERVER_LEVEL}
 
 
 def reach(store, board_id: str) -> dict[str, dict]:

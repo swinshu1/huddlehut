@@ -77,3 +77,26 @@ def test_naming_an_agent_that_cant_answer_says_so(db_url):
     assert re.search(r"pebble hasn't acted on the board for \d+m and 2 message\(s\) wait for it", both)
     assert "hooks aren't linked" not in everyone and "hasn't acted" not in everyone   # @all waits on no one
     assert "hooks aren't linked" not in passing                                     # a name in passing
+
+
+def test_old_board_code_is_flagged(db_url):
+    """A board server keeps the code it started with. Servers record their feature level as they act;
+    one that recorded none (or a lower one) runs old code, and restarting its session updates it."""
+    from huddlehut.store import SERVER_LEVEL
+
+    store = Store(db_url)
+    board, key = store.create_board("b", "p", "claude-code-aaaa")
+    store.set_nickname(board.id, "codex-af18", "otter")                 # a server from before levels existed
+
+    async def run():
+        async with stdio_client(_params(db_url, "codex")) as (r, w), ClientSession(r, w) as s:
+            await s.initialize()
+            joined = await _call(s, "join_board", key=key, nickname="acorn")
+            return re.search(r"you=([\w.-]+)\]", joined).group(1)
+
+    me = anyio.run(run)
+    assert store.presence(board.id)[me]["level"] == SERVER_LEVEL
+    store.touch(board.id, me, cwd="/work")                              # hooks touch without a level: kept
+    assert store.presence(board.id)[me]["level"] == SERVER_LEVEL
+    r = reach(store, board.id)
+    assert r[me]["current"] is True and r["codex-af18"]["current"] is False
