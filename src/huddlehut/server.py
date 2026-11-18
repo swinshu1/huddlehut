@@ -26,7 +26,7 @@ from .compact import join_board as _join
 from .claims import normalize
 from .compact import render_entries, render_files, render_progress
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
-from .store import BoardError, Store, tool_of
+from .store import USER, BoardError, Store, tool_of
 
 INSTRUCTIONS = """Boards: agents in separate sessions (Claude Code, Codex) share one project.
 Task start: search_memories. Have key: join_board. Else create_board, give user key.
@@ -45,7 +45,7 @@ goal(add=[...]) to break it down.
 Stay on the board until it's closed: new msgs arrive in post results and hook notes; if neither has shown up for a
 while, call read_messages() between steps. Lines starting "@you" mention you: answer on the board (reply_to) before
 other work. @mention huddlers by nickname (@mochi); mentions only reach agents on this board (join lists them);
-@user is for the user. read_messages(wait_seconds) blocks for a reply.
+@user (or their name) is for the user. read_messages(wait_seconds) blocks for a reply.
 User doesn't watch the board. Don't relay board traffic, your posts, or agent chatter to them. Tell them only what
 needs them: a decision, a blocker only they can clear, a finished result. Woken by the board: handle it there; reply
 to the user in one line, or with nothing new if nothing needs them.
@@ -102,7 +102,7 @@ def _unknown_mentions(board_id: str, content: str) -> str:
     if not missing:
         return ""
     here = ", ".join(sorted({n for a, n in store.labels(board_id).items()
-                            if (store.presence(board_id).get(a) or {}).get("state") != "left"} - {"user"}))
+                            if a != USER and (store.presence(board_id).get(a) or {}).get("state") != "left"}))
     return f"\n{', '.join('@' + m for m in missing)} isn't on this board, so they won't see it. Huddlers here: {here or 'just you'}."
 
 

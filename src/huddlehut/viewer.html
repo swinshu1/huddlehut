@@ -49,6 +49,14 @@ h1, h2 { margin: 0; font-weight: 600; }
 .side [aria-current="page"] { background: var(--hover); }
 .side .m { display: block; font-size: 12.5px; color: var(--muted); }
 .side .mem { margin-top: 20px; }
+.me { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 6px 10px; border-radius: 10px; text-align: left; }
+.me:hover { background: var(--hover); }
+.me .sub { font-size: 12.5px; color: var(--muted); }
+.me-edit { padding: 2px 10px; }
+.me-edit input { width: 100%; font: inherit; color: var(--fg); background: var(--bg); border: 0; border-radius: 8px;
+  box-shadow: 0 0 0 1px var(--line); padding: 5px 9px; }
+.me-edit input:focus { outline: none; box-shadow: 0 0 0 1px var(--fg); }
+.me-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
 
 main { padding: 44px clamp(20px, 5vw, 64px) 96px; max-width: 820px; }
 .title { font-size: 22px; letter-spacing: -.01em; }
@@ -185,6 +193,8 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
     <div class="label" id="closed-label">closed</div>
     <ul id="closed-boards"></ul>
     <a class="mem" href="#/memory" id="mem-link">memory</a>
+    <div class="label">you</div>
+    <div id="me"></div>
   </aside>
   <main id="main"></main>
 </div>
@@ -233,11 +243,36 @@ async function get(url) {
 let boards = [], last = "";
 let pending = null, outcomeDraft = "", actionError = "", working = false;  // inline confirm panel state
 let errAt = "panel", goalDraft = null, msDraft = "", cur = null;  // goal editing; cur = the board on screen
+let me = "user", meDraft = null, meError = "";  // your name, shown instead of "user"
 const open = new Set();
 
 function long(text, key) {
   if (text.length < 240 || open.has(key)) return `<div class="text">${fmt(text)}</div>`;
   return `<div class="text clamp">${fmt(text)}</div><button class="more" data-open="${esc(key)}">more</button>`;
+}
+
+function renderMe() {  // drawn on its own, so the 4-second refresh never wipes a name being typed
+  $("#me").innerHTML = meDraft === null
+    ? `<button class="me" id="edit-me" title="change your name">${who("user", me)}<span class="sub">${me === "user" ? "set your name" : "rename"}</span></button>`
+    : `<div class="me-edit"><input id="me-input" value="${esc(meDraft)}" maxlength="16" placeholder="your name" autocomplete="off" aria-label="your name">
+       <div class="me-hint">enter to save, esc to cancel. agents see it too.</div>${meError ? `<p class="err">${esc(meError)}</p>` : ""}</div>`;
+}
+async function editMe() {
+  meDraft = me === "user" ? "" : me; meError = ""; renderMe();
+  const f = $("#me-input"); f.focus(); f.select();
+}
+async function saveMe() {
+  try {
+    const r = await fetch("/api/me", {method: "POST", headers: {"X-Huddlehut": "1", "Content-Type": "application/json"},
+                                      body: JSON.stringify({name: meDraft})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    me = d.name; meDraft = null; meError = "";
+    renderMe(); render(true);  // every board shows the new name
+  } catch (e) {
+    meError = e.message; renderMe();
+    const f = $("#me-input"); f.focus();
+  }
 }
 
 function side(route) {
@@ -417,6 +452,7 @@ document.addEventListener("click", e => {
   if (e.target.id === "do-close") { closeBoard(); return; }
   if (e.target.id === "do-end") { endSession(); return; }
   if (e.target.id === "cancel") { pending = null; actionError = ""; render(true); return; }
+  if (e.target.closest("#edit-me")) { editMe(); return; }
   if (e.target.id === "edit-goal") { editGoal(); return; }
   if (e.target.id === "save-goal") { saveGoal(); return; }
   if (e.target.id === "cancel-goal") { goalDraft = null; actionError = ""; render(true); return; }
@@ -432,6 +468,11 @@ document.addEventListener("click", e => {
   if (m) { open.add(m.dataset.open); render(true); }
 });
 document.addEventListener("keydown", e => {
+  if (e.target.id === "me-input") {
+    if (e.key === "Enter") saveMe();
+    if (e.key === "Escape") { meDraft = null; meError = ""; renderMe(); }
+    return;
+  }
   if (e.target.id === "goal-input") {
     if (e.key === "Enter") saveGoal();
     if (e.key === "Escape") { goalDraft = null; actionError = ""; render(true); }
@@ -449,6 +490,7 @@ document.addEventListener("keydown", e => {
 document.addEventListener("input", e => {
   if (e.target.id === "outcome") { outcomeDraft = e.target.value; return; }
   if (e.target.id === "goal-input") { goalDraft = e.target.value; return; }
+  if (e.target.id === "me-input") { meDraft = e.target.value; return; }
   if (e.target.id === "ms-input") { msDraft = e.target.value; return; }
   if (e.target.id !== "q") return;
   clearTimeout(window._t);
@@ -456,6 +498,8 @@ document.addEventListener("input", e => {
 });
 window.addEventListener("hashchange", () => { last = ""; pending = null; actionError = ""; goalDraft = null; msDraft = ""; render(true); scrollTo(0, 0); });
 render(true);
+renderMe();
+get("/api/me").then(d => { me = d.name; if (meDraft === null) renderMe(); }).catch(() => {});
 setInterval(() => { if (!document.hidden) render(); }, 4000);
 </script>
 </body>

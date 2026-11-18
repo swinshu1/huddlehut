@@ -82,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cf = sub.add_parser("config", help="show or set where boards are stored")
     cf.add_argument("--database-url", help="postgresql://... for a shared database; '' for local SQLite")
+    cf.add_argument("--name", help="your name on the boards, shown instead of 'user' ('' resets it)")
 
     ins = sub.add_parser("install", help="wire huddlehut into Claude Code (plugin) or Codex (MCP + hooks)")
     ins.add_argument("client", choices=("claude", "codex"))
@@ -103,6 +104,12 @@ def main(argv: list[str] | None = None) -> int:
 
         if a.cmd == "config":
             print(install.set_database(a.database_url) if a.database_url is not None else install.describe())
+            if a.name is not None:
+                try:
+                    print(f"You're {Store().set_user_name(a.name)} on the boards.")
+                except BoardError as e:
+                    print(f"error: {e}", file=sys.stderr)
+                    return 1
             return 0
         try:
             steps = (install.install_claude if a.client == "claude" else install.install_codex)(a.dry_run)

@@ -74,6 +74,7 @@ SESSION_TIMEOUT = float(os.environ.get("HUDDLEHUT_SESSION_TIMEOUT_DAYS", "3")) *
 CUTE_NAMES = ("mochi", "pebble", "sprout", "biscuit", "dumpling", "noodle", "pickle", "waffle", "acorn", "button",
               "pudding", "peanut", "clover", "maple", "tofu", "fig", "nugget", "bean", "muffin", "sesame", "truffle",
               "pumpkin", "marble", "puffin", "otter", "bramble", "cocoa", "juniper", "kiwi", "toffee", "pretzel", "minnow")
+USER = "user"  # author id of everything the human posts (from the viewer, or as the user)
 RESERVED_NICKNAMES = {"all", "everyone", "everybody", "agents", "team", "agent", "user", "me", "you",
                       "codex", "claude", "claude-code"}
 
@@ -185,6 +186,7 @@ CREATE TABLE IF NOT EXISTS claims (
 CREATE TABLE IF NOT EXISTS identities (
     client TEXT PRIMARY KEY, agent TEXT NOT NULL, created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS milestones (
     id INTEGER PRIMARY KEY AUTOINCREMENT, board_id TEXT NOT NULL REFERENCES boards(id), text TEXT NOT NULL,
     position REAL NOT NULL, created_by TEXT NOT NULL, created_at REAL NOT NULL, done_by TEXT, done_at REAL
@@ -238,6 +240,7 @@ POSTGRES_SCHEMA = [
     "ALTER TABLE claims ADD COLUMN IF NOT EXISTS locked INTEGER NOT NULL DEFAULT 0",
     """CREATE TABLE IF NOT EXISTS identities (
         client TEXT PRIMARY KEY, agent TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL)""",
+    "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     """CREATE TABLE IF NOT EXISTS milestones (
         id BIGSERIAL PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), text TEXT NOT NULL,
         position DOUBLE PRECISION NOT NULL, created_by TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL,
@@ -830,7 +833,7 @@ class Store:
     def set_nickname(self, board_id: str, agent: str, wanted: str | None = None) -> tuple[str, str | None]:
         """Give an agent a nickname on a board. Returns (nickname, why the wanted one wasn't used)."""
         current = self.nicknames(board_id)
-        taken = {n for a, n in current.items() if a != agent}
+        taken = {n for a, n in current.items() if a != agent} | {self.user_name()}
         why = None
         nick = re.sub(r"[^a-z0-9-]", "", (wanted or "").strip().lower().replace(" ", "-"))[:16].strip("-")
         if wanted is not None and wanted.strip():
@@ -863,11 +866,37 @@ class Store:
             self.db.execute("UPDATE presence SET model=? WHERE board_id=? AND agent=?", (model, board_id, agent))
 
     def labels(self, board_id: str) -> dict[str, str]:
-        """Display name per agent: its nickname, else its 4-char tag."""
+        """Display name per agent: its nickname, else its 4-char tag. The user shows by their name."""
         names = self.nicknames(board_id)
         authors = {r["author"] for r in self._all("SELECT DISTINCT author FROM messages WHERE board_id=?", (board_id,))}
         holders = {c["agent"] for c in self.claims(board_id)}
-        return {a: names.get(a) or short_id(a) for a in {*names, *self.presence(board_id), *authors, *holders}}
+        everyone = {*names, *self.presence(board_id), *authors, *holders}
+        if USER in everyone:
+            names[USER] = self.user_name()
+        return {a: names.get(a) or short_id(a) for a in everyone}
+
+    # ---- the user's name ----------------------------------------------------
+    # The human's posts are always authored "user" (that's what @user, pins and agents key on); this is
+    # the name everyone sees for it. On a shared database everyone's viewer posts as "user" and shares it.
+
+    def user_name(self) -> str:
+        row = self._one("SELECT value FROM settings WHERE key='user_name'")
+        return row["value"] if row else USER
+
+    def set_user_name(self, wanted: str) -> str:
+        name = re.sub(r"[^a-z0-9-]", "", wanted.strip().lower().replace(" ", "-"))[:16].strip("-")
+        if not name or name == USER:
+            self.db.execute("DELETE FROM settings WHERE key='user_name'")
+            return USER
+        if not re.fullmatch(r"[a-z][a-z0-9-]{1,15}", name) or name in RESERVED_NICKNAMES:
+            raise BoardError(f"'{wanted.strip()}' isn't usable: one short word, letters first")
+        clash = self._one("SELECT b.name FROM presence p JOIN boards b ON b.id = p.board_id"
+                          " WHERE b.status='open' AND p.nickname=? AND p.state != 'left' LIMIT 1", (name,))
+        if clash:
+            raise BoardError(f"an agent on {clash['name']} is called {name}; pick another name")
+        self.db.execute("INSERT INTO settings (key, value) VALUES ('user_name', ?)"
+                        " ON CONFLICT (key) DO UPDATE SET value = excluded.value", (name,))
+        return name
 
     # ---- file inventory (who is working on which files) --------------------
 

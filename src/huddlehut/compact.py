@@ -176,6 +176,9 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
             if p["state"] != "left"]
     if here:
         parts.append("Huddlers: " + ", ".join(here))
+    user = store.user_name()
+    if user != "user":
+        parts.append(f"User: {user} (@{user} or @user)")
     if statuses:
         parts.append("Now:\n" + "\n".join(
             f"#{m.id} {label(m.author)}{presence_tag(seen.get(m.author))}: {m.content}" for m in statuses))

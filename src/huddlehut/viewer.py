@@ -21,7 +21,10 @@ from .service import distill_in_background, sweep_stale_sessions
 from .store import IDLE_AFTER, MAX_POST_CHARS, BoardError, Message, Store, short_id, short_model
 
 
-USER_MENTION = re.compile(r"(?<![\w-])@(?:user|human)\b", re.I)
+def _asks_user(name: str):
+    """Matches posts addressed to the user: @user, @human, or @ their name."""
+    names = "|".join(re.escape(n) for n in {"user", "human", name})
+    return re.compile(rf"(?<![\w-])@(?:{names})(?![\w-])", re.I)
 
 
 def _msg(m: Message, snippets: dict[int, str], names: dict[str, str]) -> dict:
@@ -64,6 +67,7 @@ class Viewer:
             msgs = msgs[-limit:]
             snippets = s.snippets({m.reply_to for m in msgs if m.reply_to})
             open_ids = {m.id for m in s.open_items(b.id)}
+            asks_user = _asks_user(s.user_name())
             files: dict[str, list[dict]] = {}
             for c in s.claims(b.id):
                 files.setdefault(c["agent"], []).append({"path": c["path"], "locked": bool(c.get("locked"))})
@@ -75,7 +79,7 @@ class Viewer:
                         "at": p["waiting_at"], "source": "session"}
                        for a, p in seen.items() if p.get("waiting") and p["state"] == "active"]
             waiting += [dict(_msg(m, snippets, names), source="board")
-                        for m in msgs if m.id in open_ids and USER_MENTION.search(m.content)]
+                        for m in msgs if m.id in open_ids and asks_user.search(m.content)]
             if b.status != "open":
                 waiting = []  # a closed board has nothing left to answer
             stream = []
@@ -147,6 +151,15 @@ class Viewer:
             self.store.end_session(board_id, agent)
         return {"ok": True}
 
+    def me(self) -> dict:
+        with self.lock:
+            return {"name": self.store.user_name()}
+
+    def set_me(self, name: str) -> dict:
+        """The user's name, shown instead of "user" on every board."""
+        with self.lock:
+            return {"name": self.store.set_user_name(name)}
+
     def memory(self, q: str = "", project: str = "") -> dict:
         with self.lock:
             lessons = (self.store.search_memories(q, project or None, limit=100) if q.strip()
@@ -193,6 +206,8 @@ def make_handler(viewer: Viewer):
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
                 body = json.loads(self.rfile.read(length) or b"{}") if length else {}
                 match parts:
+                    case ["api", "me"]:
+                        self._json(viewer.set_me(str(body.get("name") or "")))
                     case ["api", "boards", b, "agents", agent, "end"]:
                         self._json(viewer.end_session(b, agent))
                     case ["api", "boards", b, "close"]:
@@ -221,6 +236,8 @@ def make_handler(viewer: Viewer):
                     self._send(200, page(), "text/html; charset=utf-8")
                 elif url.path == "/api/boards":
                     self._json(viewer.boards())
+                elif url.path == "/api/me":
+                    self._json(viewer.me())
                 elif url.path.startswith("/api/boards/"):
                     self._json(viewer.board(url.path.rsplit("/", 1)[-1]))
                 elif url.path == "/api/memory":
