@@ -1,15 +1,12 @@
-"""Wakes an idle Codex agent when the board needs it.
+"""Resumes an idle Codex agent's thread with what needs it on the board.
 
-Claude Code agents are woken by an asyncRewake Stop hook (`hook wait`). Codex hooks can't wake an idle
-thread, so when Codex's Stop hook lets an agent stop, it starts this waiter in the background. The
-waiter watches the board like `hook wait` (same rules for what needs the agent; it steps aside once
-the agent works again). When something needs the agent, it resumes the agent's own thread headlessly:
+The wake service (wake_service.py) decides when; this module does it:
 
     codex exec resume <thread> "<what's new, how to rejoin>"
 
-That turn runs with the user's Codex config. Its Stop hook starts the next waiter, and its SessionEnd
-hook leaves the agent on the board (the thread lives on). Its board server is a new process, so the
-waiter first maps the thread to the agent's identity (HUDDLEHUT_SESSION; see server._author) and the
+That turn runs headless with the user's Codex config. Its Stop hook marks the thread idle again, and its
+SessionEnd hook leaves the agent on the board (the thread lives on). Its board server is a new process,
+so the agent's identity is mapped to the thread first (HUDDLEHUT_SESSION; see server._author), and the
 prompt carries the board key.
 
 Off with HUDDLEHUT_CODEX_WAKE=0. Log: ~/.huddlehut/wake.log; the last woken turn's Codex output:
@@ -22,7 +19,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -36,17 +32,6 @@ FORWARD = ("HUDDLEHUT_DATABASE_URL", "HUDDLEHUT_DB", "HUDDLEHUT_HOME")
 
 def enabled() -> bool:
     return os.environ.get("HUDDLEHUT_CODEX_WAKE", "1") != "0"
-
-
-def spawn(inp: dict) -> None:
-    """Called by Codex's Stop hook when it lets the agent stop: start a detached waiter for the thread."""
-    sid = inp.get("session_id") or ""
-    if not enabled() or not hook.load(sid) or hook.awaiting_user(inp.get("last_assistant_message")):
-        return  # off, not on a board, or waiting on the user: don't wake it before they answer
-    cwd = inp.get("cwd") or (hook.load(sid).get("git") or {}).get("cwd") or str(Path.home())
-    subprocess.Popen([sys.executable, "-m", "huddlehut.codex_wake", sid, cwd],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)  # outlives the hook and Codex's turn
 
 
 def codex_bin() -> str | None:
@@ -132,25 +117,3 @@ def wake(store, sid: str, cwd: str, state: dict, msgs) -> int | str:
             hook.save(sid, now)
     log(sid, f"{me} woke, codex exit {code}")
     return code
-
-
-def run(sid: str, cwd: str) -> int | str | None:
-    found = hook.watch(sid)
-    if not found:
-        return None
-    store, state, msgs = found
-    return wake(store, sid, cwd, state, msgs)
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    sid, cwd = argv[0], argv[1]
-    try:
-        run(sid, cwd)
-    except Exception as e:  # detached: nobody sees a traceback
-        log(sid, f"{type(e).__name__}: {e}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
