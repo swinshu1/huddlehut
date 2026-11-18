@@ -57,7 +57,7 @@ def prompt_for(store, state: dict, msgs, ticket: str) -> str:
     return (f"[huddlehut] You were idle; board {board.name} has something for you:\n"
             f"{hook._render(store, msgs)}\n"
             f"First join_board(key={key}, nickname={nick!r}, ticket={ticket!r}): it keeps you {nick} even if "
-            f"your board tools restarted. Then handle it on the board (post with reply_to). {hook.USER_QUIET}")
+            f"your board tools restarted. Then handle it on the board (post with reply_to). {hook.WOKEN}")
 
 
 def log(sid: str, line: str) -> None:
