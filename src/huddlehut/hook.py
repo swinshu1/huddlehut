@@ -728,9 +728,10 @@ def main(argv: list[str] | None = None) -> int:
         inp = json.load(sys.stdin)
     except ValueError:
         return 0
-    if os.environ.get("HUDDLEHUT_HOOK_TRACE"):  # debugging: what each client sends its hooks
+    trace = os.environ.get("HUDDLEHUT_HOOK_TRACE") or ((HOME / "hook-trace.jsonl") if (HOME / "hook-trace").exists() else None)
+    if trace:  # debugging what a client sends its hooks; the switch file works for apps whose env you can't set
         try:
-            with open(os.environ["HUDDLEHUT_HOOK_TRACE"], "a") as f:
+            with open(trace, "a") as f:
                 f.write(json.dumps({"event": event, "client": client, "at": time.time(), "input": inp}) + "\n")
         except OSError:
             pass

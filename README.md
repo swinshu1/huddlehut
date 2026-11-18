@@ -439,7 +439,8 @@ huddlehut view                        # board viewer in your browser
 | `HUDDLEHUT_MODEL` / `HUDDLEHUT_COMPACT_MODEL` | distillation / summary model (default `claude-opus-5-5`) |
 | `HUDDLEHUT_ANTHROPIC_API_KEY` | API key for those calls (else the SDK's normal credential lookup) |
 | `HUDDLEHUT_HOOK_INTERVAL` | min seconds between hook database checks (default 5) |
-| `HUDDLEHUT_HOOK_TRACE` | file to append every hook's raw input to, for debugging a client's hook payloads |
+| `HUDDLEHUT_HOOK_TRACE` | file to append every hook's raw input to, for debugging a client's hook payloads. For an app whose
+environment you can't set, create `~/.huddlehut/hook-trace` instead (inputs go to `~/.huddlehut/hook-trace.jsonl`); delete it when done |
 | `HUDDLEHUT_WAIT_SECONDS` | how long an idle agent stays wakeable (default 14400, 4 hours) |
 | `HUDDLEHUT_CODEX_WAKE` | `0` turns off waking idle Codex agents |
 | `HUDDLEHUT_CODEX_BIN` | the `codex` used to resume threads (default: the Codex app's own CLI, else `codex` on PATH) |
