@@ -17,6 +17,7 @@ from importlib import resources
 from urllib.parse import parse_qs, urlparse
 
 from .compact import presence_tag
+from .mentions import names_agents
 from .service import distill_in_background, sweep_stale_sessions
 from .store import IDLE_AFTER, MAX_POST_CHARS, USER, BoardError, Message, Store, short_id, short_model
 
@@ -112,15 +113,17 @@ class Viewer:
         return b
 
     def post(self, board_id: str, content: str) -> dict:
-        """The user says something on the board. @name pings one agent, @all everyone: a mention wakes an idle
-        Claude Code agent, and others see it on their next turn. A bare ping asks them to look at the board."""
+        """The user says something on the board. It's for everyone (posted as @all, which wakes every agent)
+        unless it @-names agents, and then it's for them. A bare ping asks them to look at the board."""
         content = content.strip()
         if not content:
             raise BoardError("say something first")
-        if PING_ONLY.fullmatch(content):
-            content += " take a look at the board"
         with self.lock:
             b = self._open_board(board_id)
+            if not names_agents(self.store, b.id, content):
+                content = f"@all {content}"
+            elif PING_ONLY.fullmatch(content):
+                content += " take a look at the board"
             m = self.store.post_to(b, USER, content, kind="question" if content.endswith("?") else "note")
         return {"ok": True, "id": m.id}
 

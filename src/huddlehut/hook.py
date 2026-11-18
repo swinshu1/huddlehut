@@ -41,6 +41,8 @@ import time
 import uuid
 from pathlib import Path
 
+from .mentions import mention_names, mentions
+
 HOME = Path(os.environ.get("HUDDLEHUT_HOME", Path.home() / ".huddlehut"))
 SESSIONS = HOME / "sessions"
 MARKER = re.compile(r"\[(b_[0-9a-f]{8}) you=([\w.-]+)\]")
@@ -235,31 +237,6 @@ def _render(store, msgs) -> str:
     if omitted:
         text = f"(+{omitted} earlier: read_messages(since_id={msgs[0].id - 1}))\n" + text
     return text
-
-
-_EVERYONE = re.compile(r"(?<![\w-])@(?:all|everyone|everybody|agents|team)\b", re.I)
-
-
-def mention_names(me: str, others) -> set[str]:
-    """How other agents may address this one: full name, 4-char tag, and the plain tool name
-    ("codex", "claude-code", "claude") when no other agent on the board shares it."""
-    names = {me}
-    base, _, tag = me.rpartition("-")
-    if base and re.fullmatch(r"[0-9a-f]{4}", tag):
-        names.add(tag)
-        other_bases = {o.rpartition("-")[0] for o in others if o != me}
-        if base not in other_bases:
-            names.add(base)
-            short = base.split("-")[0]
-            if short != base and short not in {b.split("-")[0] for b in other_bases}:
-                names.add(short)
-    return names
-
-
-def mentions(text: str, names: set[str]) -> bool:
-    if _EVERYONE.search(text):
-        return True
-    return any(re.search(rf"(?<![\w-])@?{re.escape(n)}(?![\w-])", text, re.I) for n in names)
 
 
 def _needs_me(store, board_id: str, me: str, msgs) -> list:

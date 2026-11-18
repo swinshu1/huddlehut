@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import secrets
 import time
 
@@ -25,6 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from .compact import join_board as _join
 from .claims import normalize
 from .compact import render_entries, render_files, render_progress, render_view
+from .mentions import addressable, mention_names, mentions, tags
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
 from .store import USER, BoardError, Store, tool_of
 
@@ -82,23 +82,8 @@ tool = mcp.tool(structured_output=False)  # plain text only: no output schema, n
 
 
 HOOK_GRACE = float(os.environ.get("HUDDLEHUT_HOOK_GRACE", "120"))  # seconds before "hooks off" nudge
-ALWAYS_OK = {"user", "human", "all", "everyone", "everybody", "agents", "team"}
-
-
-def _addressable(board_id: str) -> set[str]:
-    """Every way to @ someone on this board, lowercased: nicknames, tags, ids, unique tool names."""
-    from .hook import mention_names
-
-    agents = set(store.presence(board_id)) | set(store.labels(board_id))
-    names = set(ALWAYS_OK) | {n.lower() for n in store.labels(board_id).values()}
-    for a in agents:
-        names |= {n.lower() for n in mention_names(a, agents)}
-    return names
-
-
 def _unknown_mentions(board_id: str, content: str) -> str:
-    tags = {t.lower() for t in re.findall(r"(?<![\w-])@([\w-]+)", content)}
-    missing = sorted(tags - _addressable(board_id))
+    missing = sorted(tags(content) - addressable(store, board_id))
     if not missing:
         return ""
     here = ", ".join(sorted({n for a, n in store.labels(board_id).items()
@@ -108,8 +93,6 @@ def _unknown_mentions(board_id: str, content: str) -> str:
 
 def _flag_mentions(board_id: str, msgs, text: str) -> str:
     """Prefix lines that mention this agent with "@you" so they stand out."""
-    from .hook import mention_names, mentions
-
     names = mention_names(AUTHOR, set(store.presence(board_id)) | {m.author for m in msgs})
     nick = store.nicknames(board_id).get(AUTHOR)
     if nick:

@@ -5,7 +5,7 @@ import threading
 import pytest
 
 from huddlehut import hook
-from huddlehut.hook import mention_names, mentions
+from huddlehut.mentions import mention_names, mentions
 from test_coordination import ME, OTHER, env, link, repo, run  # noqa: F401  (fixtures)
 
 CODEX = "codex-3f2a"

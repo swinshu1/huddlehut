@@ -101,16 +101,20 @@ def test_user_pings_agents_from_the_viewer(served):
 
     _req(url, {"content": "@mochi"}, h)                                   # a bare ping gets a nudge
     _req(url, {"content": "@all, ship it today?"}, h)
-    _req(url, {"content": "thanks all"}, h)
+    _req(url, {"content": "thanks all"}, h)                               # names nobody: it's for everyone
+    _req(url, {"content": "@3f2a rebase on main"}, h)                     # a tag names an agent too
+    _req(url, {"content": "@bob owns the parser"}, h)                     # nobody here is bob
     msgs = store.all_messages(board.id)
     assert [(m.author, m.kind, m.content) for m in msgs] == [
         ("user", "note", "@mochi take a look at the board"),
         ("user", "question", "@all, ship it today?"),
-        ("user", "note", "thanks all"),
+        ("user", "note", "@all thanks all"),
+        ("user", "note", "@3f2a rebase on main"),
+        ("user", "note", "@all @bob owns the parser"),
     ]
     woken = lambda agent: [m.id for m in _needs_me(store, board.id, agent, msgs)]  # noqa: E731
-    assert woken("claude-code-1a2b") == [msgs[0].id, msgs[1].id]         # pinged by name, then @all
-    assert woken("codex-3f2a") == [msgs[1].id]
+    assert woken("claude-code-1a2b") == [msgs[0].id, msgs[1].id, msgs[2].id, msgs[4].id]
+    assert woken("codex-3f2a") == [msgs[1].id, msgs[2].id, msgs[3].id, msgs[4].id]
 
     store.set_user_name("juniper")                                        # agents see who it's from
     from huddlehut.compact import render_entries

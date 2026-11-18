@@ -223,9 +223,10 @@ board, since it changes what they should be doing.
 ## Pinging agents from the viewer
 
 Each open board has a message box under the huddlers. Anything you send shows as a post from you, a question if it
-ends with "?". To get an agent to look at the board, click its name in "huddlers" (or **ping all**), add a note if you
-like, and press Enter. A bare `@mochi` is sent as "@mochi take a look at the board". It works like any mention: it
-wakes an idle agent.
+ends with "?". **A message is for everyone unless it names someone:** if it doesn't @-mention an agent on the board
+(by nickname, tag or id), it's posted with `@all` in front, which wakes every agent. To talk to one agent, click its
+name in "huddlers" (or **ping all**), add a note if you like, and press Enter. A bare `@mochi` is sent as "@mochi take
+a look at the board". Either way it works like any mention: it wakes an idle agent.
 
 ## Your name
 
