@@ -26,7 +26,7 @@ from .compact import join_board as _join
 from .claims import normalize
 from .compact import render_entries, render_files, render_progress
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
-from .store import BoardError, Store
+from .store import BoardError, Store, tool_of
 
 INSTRUCTIONS = """Boards: agents in separate sessions (Claude Code, Codex) share one project.
 Task start: search_memories. Have key: join_board. Else create_board, give user key.
@@ -53,8 +53,31 @@ Done: close_board(outcome)."""
 
 mcp = MCPServer("huddlehut", instructions=INSTRUCTIONS)
 store = Store()
-# One server process per client session; the suffix tells two sessions of the same tool apart.
-AUTHOR = DEFAULT_AGENT if os.environ.get("HUDDLEHUT_EXACT_NAME") else f"{DEFAULT_AGENT}-{secrets.token_hex(2)}"
+# Env vars that name the client session, steadiest first. Claude Code passes its session ids to the
+# servers it starts; Codex passes none, so Codex agents get their identity back by nickname instead.
+CLIENT_VARS = ("HUDDLEHUT_SESSION", "CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
+
+
+def _client() -> str | None:
+    """This server's client session, e.g. "claude-code:local_3fe7…", or None if the client doesn't say."""
+    for var in CLIENT_VARS:
+        if os.environ.get(var, "").strip():
+            return f"{DEFAULT_AGENT}:{os.environ[var].strip()}"
+    return None
+
+
+def _author() -> str:
+    """This agent's id. One server process per client session; the suffix tells two sessions of the same
+    tool apart. A session the database has seen before gets its old id back, so a restarted or resumed
+    session keeps its nickname, read position, files and promises."""
+    if os.environ.get("HUDDLEHUT_EXACT_NAME"):
+        return DEFAULT_AGENT
+    fresh = f"{DEFAULT_AGENT}-{secrets.token_hex(2)}"
+    return store.identity(CLIENT, fresh) if CLIENT else fresh
+
+
+CLIENT = _client()
+AUTHOR = _author()
 tool = mcp.tool(structured_output=False)  # plain text only: no output schema, no duplicate JSON result
 
 
@@ -120,7 +143,7 @@ class Session:
     def use(self, key: str) -> str:
         key = key.strip() or self.key or ""
         if not key:
-            raise BoardError("no board. join_board(key) or create_board first")
+            raise BoardError("no board. join_board(key, nickname) or create_board first; rejoining keeps your name")
         self.key = key
         try:
             store.touch(store.board_for_key(key).id, AUTHOR)  # presence: this agent is active
@@ -152,16 +175,37 @@ def _held_note(m) -> str:
     return "".join(f"\nnot claimed: {p} held by {names.get(c['agent'], c['agent'])}. Ask them first." for p, c in held)
 
 
+def _become(agent: str) -> None:
+    """Take over an earlier identity of this agent (the server restarted and lost it)."""
+    global AUTHOR
+    AUTHOR = agent
+    if CLIENT:
+        store.remember_identity(CLIENT, agent)
+
+
 def _identity(board_id: str, nickname: str, model: str) -> str:
-    """Set this agent's nickname (and model) on the board; tell it who it is here."""
+    """Give this agent its name on the board and tell it who it is here. A name it had here before wins
+    over a new one: others already know it by that name."""
+    current = store.nicknames(board_id).get(AUTHOR)
+    note = ""
+    if not current and nickname.strip():
+        earlier = store.dormant_holder(board_id, nickname, tool_of(AUTHOR))
+        if earlier and earlier != AUTHOR:
+            _become(earlier)
+            current = store.nicknames(board_id).get(AUTHOR)
+            note = " (your name from before; your read position, files and promises carried over)"
     if model:
         store.set_model(board_id, AUTHOR, model)
-    current = store.nicknames(board_id).get(AUTHOR)
-    if nickname or not current:
-        nick, why = store.set_nickname(board_id, AUTHOR, nickname or None)
-    else:
-        nick, why = current, None
-    note = f" ({why}; you got this one)" if why else ""
+    if current:
+        store.touch(board_id, AUTHOR)
+        if not note and nickname.strip() and nickname.strip().lower() != current:
+            note = " (your name from before; keep it)"
+        return f"You're {current} here{note}."
+    nick, why = store.set_nickname(board_id, AUTHOR, nickname or None)
+    if why:
+        note = f" ({why}; you got this one)"
+    elif not nickname.strip():
+        note = " (you didn't pick a nickname; you got this one)"
     return f"You're {nick} here{note}."
 
 
@@ -174,7 +218,7 @@ S = Session()
 
 
 @tool
-def create_board(name: str, project: str, goal: str = "", nickname: str = "", model: str = "") -> str:
+def create_board(name: str, project: str, nickname: str, goal: str = "", model: str = "") -> str:
     """Spin up board. project: repo name. nickname: cute one-word name for yourself. model: your model id."""
     existing = [b for b in store.list_boards(project) if b.name != name]
     board, key = store.create_board(name, project, AUTHOR, goal)
@@ -187,13 +231,14 @@ def create_board(name: str, project: str, goal: str = "", nickname: str = "", mo
 
 
 @tool
-async def join_board(key: str, nickname: str = "", model: str = "", status: str = "") -> str:
-    """Join by key. nickname: cute one-word name for yourself. model: your model id. status: what you'll do.
+async def join_board(key: str, nickname: str, model: str = "", status: str = "") -> str:
+    """Join by key. nickname: cute one-word name for yourself (your old one if you were here before). model: your model id. status: what you'll do.
     Returns who does what, open questions, decision log."""
     try:
-        S.use(key)
+        board_id = store.board_for_key(key.strip()).id
         sweep_stale_sessions(store)
-        me = _identity(store.board_for_key(key).id, nickname, model)
+        me = _identity(board_id, nickname, model)   # first: it may switch this session to its old identity
+        S.use(key)
         note = ""
         if status:
             note = _held_note(store.post(key, AUTHOR, status, kind="status"))

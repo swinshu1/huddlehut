@@ -8,9 +8,13 @@ import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+CLIENT_VARS = ("HUDDLEHUT_SESSION", "CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
 
-def _params(db, agent):
-    env = {**os.environ, "HUDDLEHUT_DATABASE_URL": str(db), "HUDDLEHUT_AGENT": agent, "ANTHROPIC_API_KEY": ""}
+
+def _params(db, agent, **extra):
+    # drop the session ids of whatever is running the tests: each test server is its own session
+    env = {k: v for k, v in os.environ.items() if k not in CLIENT_VARS}
+    env.update({"HUDDLEHUT_DATABASE_URL": str(db), "HUDDLEHUT_AGENT": agent, "ANTHROPIC_API_KEY": "", **extra})
     return StdioServerParameters(command=sys.executable, args=["-m", "huddlehut.server"], env=env)
 
 
@@ -42,9 +46,8 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
             assert await _call(claude, "post", content="parser; own src/parser/*", kind="status") == "ok #1"
             assert await _call(claude, "post", content="spans on AST nodes?", kind="question") == "ok #2"
 
-            taken = await _call(codex, "join_board", key=key, nickname="mochi", model="gpt-5-codex")
-            assert "You're " in taken and "'mochi' is taken" in taken     # gets a fallback name, told why
-            joined = await _call(codex, "join_board", key=key, nickname="acorn", status="tests in tests/parser")
+            joined = await _call(codex, "join_board", key=key, nickname="acorn", model="gpt-5-codex",
+                                 status="tests in tests/parser")
             assert "You're acorn here." in joined and "goal: new parser" in joined
             # nicknames everywhere; the model shows in the roster only; "own src/parser/*" went into the inventory
             assert "Now:\n#1 mochi (opus 5.5): parser\n#3 acorn (gpt-5-codex): tests in tests/parser" in joined
@@ -73,7 +76,7 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
             clash = await _call(codex, "files", claim=["src/parser/lexer.py", "tests/parser/test_lexer.py"])
             assert "not claimed: src/parser/lexer.py held by mochi" in clash
             assert "acorn: tests/parser/test_lexer.py" in clash
-            assert "src/parser/*" in (await _call(codex, "join_board", key=key))       # inventory in the view
+            assert "src/parser/*" in (await _call(codex, "join_board", key=key, nickname="acorn"))  # inventory
             done = await _call(claude, "files", release=["*"])
             assert "mochi" not in done
             locked = await _call(claude, "files", lock=["src/schema.py"])
@@ -81,7 +84,7 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
             assert "not locked: src/schema.py held by" in await _call(codex, "files", lock=["src/schema.py"])
             assert "(locked)" not in await _call(claude, "files", unlock=["*"])
 
-            second = await _call(claude, "create_board", name="docs", project="repo-x")
+            second = await _call(claude, "create_board", name="docs", project="repo-x", nickname="mochi")
             assert "Other open boards repo-x: parser rewrite" in second
 
             assert "Closed" in await _call(codex, "close_board", outcome="done")

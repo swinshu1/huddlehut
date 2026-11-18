@@ -1,18 +1,16 @@
 """Every agent stays in the loop: huddlers on join, @you flags, unknown-mention feedback, hooks-off nudge."""
 
-import os
 import re
-import sys
 
 import anyio
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession
 from mcp.client.stdio import stdio_client
+
+from test_mcp import _params as mcp_params
 
 
 def _params(db, agent):
-    env = {**os.environ, "HUDDLEHUT_DATABASE_URL": str(db), "HUDDLEHUT_AGENT": agent, "ANTHROPIC_API_KEY": "",
-           "HUDDLEHUT_HOOK_GRACE": "0"}
-    return StdioServerParameters(command=sys.executable, args=["-m", "huddlehut.server"], env=env)
+    return mcp_params(db, agent, HUDDLEHUT_HOOK_GRACE="0")
 
 
 async def _call(session, tool, **args):
