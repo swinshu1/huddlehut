@@ -159,6 +159,10 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
 
     head = f"{board.name} [{board.project}]" + ("" if board.status == "open" else f" ({board.status})")
     parts = [head + (f" goal: {board.goal}" if board.goal else "")]
+    here = [label(a) + presence_tag(p) for a, p in sorted(seen.items(), key=lambda kv: -kv[1]["seen_at"])
+            if p["state"] != "left"]
+    if here:
+        parts.append("Huddlers: " + ", ".join(here))
     if statuses:
         parts.append("Now:\n" + "\n".join(
             f"#{m.id} {label(m.author)}{presence_tag(seen.get(m.author))}: {m.content}" for m in statuses))
