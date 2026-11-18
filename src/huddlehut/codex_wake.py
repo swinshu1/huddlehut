@@ -1,21 +1,26 @@
-"""Resumes an idle Codex agent's thread with what needs it on the board.
+"""Wakes an idle Codex agent by queueing what needs it on the board to its own thread.
 
-The wake service (wake_service.py) decides when; this module does it:
+The wake service (wake_service.py) decides when; this module delivers:
 
-    codex exec resume <thread> "<what's new, how to rejoin>"
+    codex queue --thread <thread> --message "<what's new>" --resume
 
-That turn runs headless with the user's Codex config. Its Stop hook marks the thread idle again, and its
-SessionEnd hook leaves the agent on the board (the thread lives on). Its board server is a new process,
-so the agent's identity is mapped to the thread first (HUDDLEHUT_SESSION; see server._author), and the
-prompt carries the board key.
+The message goes into the thread's queue (Codex's own way to message an existing session). A thread that
+something has open, such as the Codex app or the app-server daemon, is its "active writer", which takes the
+message as a new turn right away. So the agent answers in its own session, with its own board server
+(same identity), and the user sees the turn in the app. A thread nobody has open is resumed on the local
+app-server daemon (--resume), with the daemon's own config, so that turn gets a fresh board server: the
+message carries the board key and a one-time wake ticket, and join_board(ticket=...) gets the agent its
+identity back. (Config overrides can't help: the daemon ignores them, and `codex queue` refuses them
+while a daemon runs.)
 
-Off with HUDDLEHUT_CODEX_WAKE=0. Log: ~/.huddlehut/wake.log; the last woken turn's Codex output:
+(Resuming with `codex exec resume` instead fails on any thread the app has open: one writer per thread.)
+
+Off with HUDDLEHUT_CODEX_WAKE=0. Log: ~/.huddlehut/wake.log; the last wake's Codex output:
 ~/.huddlehut/wake/<thread>.log.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -25,9 +30,8 @@ from pathlib import Path
 from . import hook
 
 APP_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
-TIMEOUT = float(os.environ.get("HUDDLEHUT_WAKE_TIMEOUT", "3600"))  # longest a woken turn may run
-# the woken turn's board server must use the same database as the hooks
-FORWARD = ("HUDDLEHUT_DATABASE_URL", "HUDDLEHUT_DB", "HUDDLEHUT_HOME")
+TIMEOUT = float(os.environ.get("HUDDLEHUT_WAKE_TIMEOUT", "120"))  # longest queueing (and a daemon resume) may take
+GUARD = 30  # seconds after queueing that the thread counts as being woken; then its transcript says it's busy
 
 
 def enabled() -> bool:
@@ -42,36 +46,18 @@ def codex_bin() -> str | None:
     return None
 
 
-def server_name() -> str:
-    """The huddlehut server's name in the user's Codex config ([mcp_servers.<name>])."""
-    import tomllib
-
-    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
-    try:
-        servers = tomllib.loads(path.read_text()).get("mcp_servers") or {}
-    except (OSError, ValueError):
-        servers = {}
-    for name, cfg in servers.items():
-        if isinstance(cfg, dict) and "huddlehut" in json.dumps([cfg.get("command"), cfg.get("args")]):
-            return name
-    return "huddlehut"
+def command(codex: str, sid: str, prompt: str) -> list[str]:
+    return [codex, "queue", "--thread", sid, "--message", prompt, "--resume"]
 
 
-def command(codex: str, sid: str, cwd: str, prompt: str) -> list[str]:
-    env = {"HUDDLEHUT_SESSION": sid, **{v: os.environ[v] for v in FORWARD if os.environ.get(v)}}
-    server = server_name()
-    overrides = [arg for k, v in env.items() for arg in ("-c", f"mcp_servers.{server}.env.{k}={json.dumps(v)}")]
-    return [codex, "exec", "--skip-git-repo-check", "-C", cwd, "resume", *overrides, sid, prompt]
-
-
-def prompt_for(store, state: dict, msgs) -> str:
+def prompt_for(store, state: dict, msgs, ticket: str) -> str:
     board = store.get_board(state["board"])
     nick = store.nicknames(board.id).get(state["me"]) or state["me"]
     key = repr(state["key"]) if state.get("key") else "<your board key>"
-    return (f"[huddlehut] You went idle; board {board.name} has something for you:\n"
+    return (f"[huddlehut] You were idle; board {board.name} has something for you:\n"
             f"{hook._render(store, msgs)}\n"
-            f"Your board tools restarted: join_board(key={key}, nickname={nick!r}) first (you keep your name), "
-            f"then handle it on the board (reply_to). {hook.USER_QUIET}")
+            f"First join_board(key={key}, nickname={nick!r}, ticket={ticket!r}): it keeps you {nick} even if "
+            f"your board tools restarted. Then handle it on the board (post with reply_to). {hook.USER_QUIET}")
 
 
 def log(sid: str, line: str) -> None:
@@ -84,9 +70,8 @@ def log(sid: str, line: str) -> None:
 
 
 def wake(store, sid: str, cwd: str, state: dict, msgs) -> int | str:
-    """Resume the agent's thread with what needs it. Returns codex's exit code (or why it didn't run)."""
-    from .store import tool_of
-
+    """Queue what needs the agent to its thread. Returns codex's exit code (or why it didn't run). The
+    turn itself runs in whatever has the thread open, so this returns once the message is queued."""
     if not enabled():
         return "off"
     codex = codex_bin()
@@ -94,10 +79,9 @@ def wake(store, sid: str, cwd: str, state: dict, msgs) -> int | str:
         log(sid, "no codex binary; set HUDDLEHUT_CODEX_BIN")
         return "no codex"
     me = state["me"]
-    store.remember_identity(f"{tool_of(me)}:{sid}", me)  # the woken turn's board server is this agent
     cwd = cwd if os.path.isdir(cwd) else str(Path.home())
-    cmd = command(codex, sid, cwd, prompt_for(store, state, msgs))
-    state["waking_until"] = time.time() + TIMEOUT
+    cmd = command(codex, sid, prompt_for(store, state, msgs, store.issue_ticket(state["board"], me)))
+    state["waking_until"] = time.time() + GUARD  # lapses on its own: the turn runs elsewhere
     hook.save(sid, state)
     log(sid, f"waking {me} for {', '.join(f'#{m.id}' for m in msgs)}")
     out = hook.HOME / "wake" / f"{sid}.log"
@@ -110,10 +94,5 @@ def wake(store, sid: str, cwd: str, state: dict, msgs) -> int | str:
         code = "timeout"
     except OSError as e:
         code = f"{type(e).__name__}: {e}"
-    finally:
-        now = hook.load(sid)
-        if now:
-            now.pop("waking_until", None)
-            hook.save(sid, now)
-    log(sid, f"{me} woke, codex exit {code}")
+    log(sid, f"queued for {me}, codex exit {code}")
     return code
