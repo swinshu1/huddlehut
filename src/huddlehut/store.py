@@ -69,6 +69,7 @@ KIND_ALIASES = {"update": "note", "thinking": "note", "plan": "status", "progres
                 "failed": "deadend", "reply": "answer", "todo": "promise", "will": "promise",
                 "commitment": "promise", "owe": "promise"}
 IDLE_AFTER = 900  # seconds without activity before an agent shows as idle
+SESSION_TIMEOUT = float(os.environ.get("HUDDLEHUT_SESSION_TIMEOUT_DAYS", "3")) * 86400  # then it's ended
 
 CUTE_NAMES = ("mochi", "pebble", "sprout", "biscuit", "dumpling", "noodle", "pickle", "waffle", "acorn", "button",
               "pudding", "peanut", "clover", "maple", "tofu", "fig", "nugget", "bean", "muffin", "sesame", "truffle",
@@ -486,7 +487,11 @@ class Store:
         return [_board(r) for r in self._all(sql + " ORDER BY created_at DESC", args)]
 
     def close_board(self, key: str, closed_by: str, outcome: str = "") -> Board:
-        board = self.board_for_key(key)
+        return self.close_board_by_id(self.board_for_key(key).id, closed_by, outcome)
+
+    def close_board_by_id(self, board_id: str, closed_by: str, outcome: str = "") -> Board:
+        """Close a board you already resolved (the viewer knows ids, not keys)."""
+        board = self.get_board(board_id)
         if board.status == "closed":
             raise BoardError(f"board {board.id} is already closed")
         self.db.execute(
@@ -495,6 +500,7 @@ class Store:
             (closed_by, time.time(), outcome.strip(), board.id),
         )
         self.db.execute("DELETE FROM claims WHERE board_id=?", (board.id,))
+        self.db.execute("UPDATE presence SET waiting=NULL, waiting_at=NULL WHERE board_id=?", (board.id,))
         return self.get_board(board.id)
 
     def reopen_board(self, key: str, reopened_by: str) -> Board:
@@ -728,7 +734,7 @@ class Store:
             (board_id, agent, time.time()),
         )
 
-    def end_session(self, board_id: str, agent: str, by: str = "user") -> Message | None:
+    def end_session(self, board_id: str, agent: str, by: str = "user", reason: str | None = None) -> Message | None:
         """End an agent's session on a board by hand (e.g. it died without a clean exit): mark it
         left, free its files, unpin it, and tell the board. If it's still alive, it reappears when
         it next acts."""
@@ -740,11 +746,26 @@ class Store:
         if board.status != "open":
             return None
         promises = [m for m in self.open_items(board_id) if m.kind == "promise" and m.author == agent]
+        why = reason or f"was ended by the {by}"
         if promises:
             ids = ", ".join(f"#{m.id}" for m in promises[:3])
-            return self.post_to(board, by, f"{name}'s session was ended by the {by}. Unkept promise: {ids}. "
-                                           "Pick it up or re-plan.", "blocker")
-        return self.post_to(board, by, f"{name}'s session was ended by the {by}; its files are free.", "note")
+            return self.post_to(board, by, f"{name}'s session {why}. Unkept promise: {ids}. Pick it up or re-plan.",
+                                "blocker")
+        return self.post_to(board, by, f"{name}'s session {why}; its files are free.", "note")
+
+    def end_stale_sessions(self, older_than: float | None = None) -> list[tuple[str, str]]:
+        """End sessions with no activity for SESSION_TIMEOUT (3 days by default) on open boards."""
+        older_than = SESSION_TIMEOUT if older_than is None else older_than
+        rows = self._all(
+            "SELECT p.board_id, p.agent FROM presence p JOIN boards b ON b.id = p.board_id"
+            " WHERE b.status='open' AND p.state='active' AND p.seen_at < ?",
+            (time.time() - older_than,),
+        )
+        days = round(older_than / 86400, 1)
+        for r in rows:
+            self.end_session(r["board_id"], r["agent"], by="huddlehut",
+                             reason=f"timed out after {days:g} days without activity")
+        return [(r["board_id"], r["agent"]) for r in rows]
 
     def presence(self, board_id: str) -> dict[str, dict]:
         return {r["agent"]: dict(r) for r in self._all("SELECT * FROM presence WHERE board_id=?", (board_id,))}
