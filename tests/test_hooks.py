@@ -176,3 +176,24 @@ def test_hook_errors_never_escape(env, monkeypatch, capsys):
     code, out, _ = run("post-tool", bash(), monkeypatch, capsys)
     assert code == 0 and out is None
     assert "no board b_deadbeef" in (hook.HOME / "hook.log").read_text()
+
+
+def test_codex_code_mode_board_calls_link_the_session(env, monkeypatch, capsys):
+    """In Codex's code mode the model calls board tools from inside a script; the hook sees the script tool
+    (exec, with its code as text) and finds the board tool's result in the script's output."""
+    store, board, key = env
+    code = f'const r = await tools.mcp__huddlehut__join_board({{key: "{key}", nickname: "sprout"}}); text(r);'
+    out = [{"type": "text", "text": f"[{board.id} you=codex-c044]\nYou're sprout here.\nparser [repo]"}]
+    run("post-tool", {"session_id": "T1", "tool_name": "exec", "tool_input": code, "tool_response": out},
+        monkeypatch, capsys, client="codex")
+    state = hook.load("T1")
+    assert (state["board"], state["me"], state["key"], state["client"]) == (board.id, "codex-c044", key, "codex")
+
+    # a script that doesn't touch the board links nothing, and text input doesn't trip the other checks
+    run("post-tool", {"session_id": "T2", "tool_name": "exec", "tool_input": "text([b_00000000 you=x])",
+                      "tool_response": "ok"}, monkeypatch, capsys, client="codex")
+    assert hook.load("T2") == {}
+    store.post(key, "claude-code-aaaa", "@sprout rebase on main", "note")
+    _, delivered, _ = run("post-tool", {"session_id": "T1", "tool_name": "exec", "tool_input": "text(1)",
+                                        "tool_response": "1"}, monkeypatch, capsys, client="codex")
+    assert "rebase on main" in delivered["hookSpecificOutput"]["additionalContext"]   # linked: news arrives

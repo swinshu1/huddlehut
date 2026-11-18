@@ -49,6 +49,10 @@ MARKER = re.compile(r"\[(b_[0-9a-f]{8}) you=([\w.-]+)\]")
 SUBAGENT_DONE_TOOLS = re.compile(r"^collaboration.*(wait|close)")  # Codex: a parent waited on or closed a subagent
 KEY = re.compile(r"\bbrd_[\w-]{16,}")
 BOARD_TOOL = re.compile(r"^mcp__.*huddlehut.*__")
+# Codex "code mode": the model calls tools from inside a script (`await tools.mcp__huddlehut__join_board(...)`),
+# so the hook sees the script tool, and the board tool's result is in the script's output.
+CODE_TOOLS = {"exec"}
+BOARD_CALL_IN_CODE = re.compile(r"mcp__\w*huddlehut\w*__")
 RISKY_GIT = re.compile(r"\bgit\b.*\b(commit|stash|reset|checkout|restore|clean)\b")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}  # Claude Code; Codex edits via apply_patch
 INTERVAL = float(os.environ.get("HUDDLEHUT_HOOK_INTERVAL", "5"))
@@ -195,6 +199,12 @@ def _risky_git(command: str) -> tuple[str, bool, str | None] | None:
         elif sub == "clean" and any(re.fullmatch(r"-\w*f\w*", a) for a in rest):
             return "delete", False, cdir
     return None
+
+
+def _tool_input(inp: dict) -> dict:
+    """The tool's input as a dict: Codex sends freeform tools' input (apply_patch, scripts) as text."""
+    raw = inp.get("tool_input")
+    return raw if isinstance(raw, dict) else {"input": raw} if isinstance(raw, str) else {}
 
 
 def _edited_paths(tool: str, tool_input: dict) -> list[str]:
@@ -396,7 +406,9 @@ def post_tool(inp: dict, client: str) -> dict | None:
     now = time.time()
     if client == "codex" and not parent and SUBAGENT_DONE_TOOLS.match(tool):
         end_subagents(sid)  # it waited on or closed its subagents: end the ones that finished
-    if BOARD_TOOL.match(tool):
+    board_tool = bool(BOARD_TOOL.match(tool))
+    in_code = tool in CODE_TOOLS and bool(BOARD_CALL_IN_CODE.search(json.dumps(inp.get("tool_input"))))
+    if board_tool or in_code:
         response = json.dumps(inp.get("tool_response"), ensure_ascii=False)
         m = MARKER.search(response)
         state = load(sid)
@@ -408,7 +420,7 @@ def post_tool(inp: dict, client: str) -> dict | None:
             state = {**keep, "board": m.group(1), "me": m.group(2), "checked": 0,
                      "last_sha": head[0] if head else None}
             # kept so a Codex wake can tell the agent how to rejoin (the database stores keys hashed)
-            key = KEY.search(str((inp.get("tool_input") or {}).get("key", ""))) or KEY.search(response)
+            key = KEY.search(json.dumps(inp.get("tool_input"))) or KEY.search(response)
             if key:
                 state["key"] = key.group(0)
             if parent:
@@ -416,14 +428,17 @@ def post_tool(inp: dict, client: str) -> dict | None:
         if state:
             _seen(state, inp, client, now)
             save(sid, state)
-        return None  # the board tool's own result already carried any new messages
+        if board_tool:
+            return None  # the board tool's own result already carried any new messages
+        # a script may do more than board calls (shell, commits): it goes through the usual checks too
     state = load(sid)
     if not state:
         return None  # not on a board: no database access, no git
     _seen(state, inp, client, now)
-    command = str((inp.get("tool_input") or {}).get("command", "")) if tool == "Bash" else ""
+    tool_input = _tool_input(inp)
+    command = str(tool_input.get("command", "")) if tool == "Bash" else ""
     committed = "git" in command and "commit" in command
-    edited = _edited_paths(tool, inp.get("tool_input") or {})
+    edited = _edited_paths(tool, tool_input)
     fresh = []
     if edited:
         from .claims import normalize
@@ -497,7 +512,7 @@ def pre_tool(inp: dict, client: str) -> dict | None:
     """Speed bumps: editing a file another active agent holds, or committing/discarding files
     another active agent holds. The first attempt is blocked with the reason; retrying proceeds."""
     tool = inp.get("tool_name") or ""
-    tool_input = inp.get("tool_input") or {}
+    tool_input = _tool_input(inp)
     if tool in EDIT_TOOLS or tool == "apply_patch":
         return _guard_edit(inp, tool, tool_input, client)
     if tool != "Bash":
