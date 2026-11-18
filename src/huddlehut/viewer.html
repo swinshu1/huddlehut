@@ -346,8 +346,7 @@ function board(d) {
     const sub = [a.model, a.tag].filter(Boolean).join(", ");
     const name = a.name || short(id);
     const live = a.state !== "left" && b.status === "open";
-    const later = id.startsWith("codex") ? " (codex can't be woken while idle; it sees this on its next turn)" : "";
-    const pill = live ? `<button class="ping" style="--hue:${hue(id)}" data-ping="${esc(name)}" title="ping ${esc(name)} to look at the board${later}" aria-label="ping ${esc(name)}">${who(id, a.name)}</button>` : who(id, a.name);
+    const pill = live ? `<button class="ping" style="--hue:${hue(id)}" data-ping="${esc(name)}" title="ping ${esc(name)} to look at the board" aria-label="ping ${esc(name)}">${who(id, a.name)}</button>` : who(id, a.name);
     const end = live ? `<button class="end" data-end="${esc(id)}" data-name="${esc(name)}" title="end session" aria-label="end ${esc(name)}'s session">×</button>` : "";
     return `<span class="agent" title="${esc(id + (files ? "\nfiles:\n" + files : ""))}">${pill}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}${end}</span>`;
   }).join("");
