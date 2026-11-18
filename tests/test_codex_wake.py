@@ -3,6 +3,7 @@ watches every linked Codex thread and resumes an idle one with `codex exec resum
 needs its agent."""
 
 import json
+import re
 import sys
 import threading
 import time
@@ -99,9 +100,8 @@ def test_due_picks_idle_codex_threads_whose_agent_is_needed(env, tmp_path):
     assert [k for k, _, _ in wake_service.due(store, wake_service.codex_threads(), busy={"idle", "older"})] == ["stopped"]
 
 
-def test_a_tick_resumes_the_thread_with_what_needs_it(env, db_url, monkeypatch, capsys, tmp_path):
+def test_a_tick_queues_what_needs_the_agent_to_its_thread(env, monkeypatch, capsys, tmp_path):
     store, board, key = env
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-config"))           # server name falls back to "huddlehut"
     calls = tmp_path / "calls.json"
     fake = tmp_path / "codex"
     fake.write_text(f"#!{sys.executable}\nimport json, os, sys\n"
@@ -125,16 +125,18 @@ def test_a_tick_resumes_the_thread_with_what_needs_it(env, db_url, monkeypatch, 
 
     call = json.loads(calls.read_text())
     argv = call["argv"]
-    assert argv[:5] == ["exec", "--skip-git-repo-check", "-C", str(tmp_path), "resume"]
-    assert argv[5:7] == ["-c", 'mcp_servers.huddlehut.env.HUDDLEHUT_SESSION="C1"']
-    assert f"mcp_servers.huddlehut.env.HUDDLEHUT_DATABASE_URL={json.dumps(db_url)}" in argv  # same database
-    assert argv[-2] == "C1" and "@acorn are the seeds rebuilt?" in argv[-1]
-    assert f"join_board(key='{key}', nickname='acorn')" in argv[-1]
-    assert call["waking"]                                                    # its SessionEnd won't mark acorn left
-    assert store.identity("codex:C1", "codex-zzzz") == "codex-cccc"         # its board server comes back as acorn
-    assert store.unread(board.id, "codex-cccc") == [] and "waking_until" not in hook.load("C1")
-    assert "waking codex-cccc for" in (hook.HOME / "wake.log").read_text()
-    assert wake_service.tick(store, busy, Inline()) == []                   # delivered once
+    # queued to the thread: whatever has it open (the Codex app) takes it as a turn; else the daemon resumes it
+    assert argv[:4] == ["queue", "--thread", "C1", "--message"] and argv[5:] == ["--resume"] and call["waking"]
+    prompt = argv[4]
+    assert "@acorn are the seeds rebuilt?" in prompt
+    ticket = re.search(rf"join_board\(key='{key}', nickname='acorn', ticket='(wk_[\w-]+)'\)", prompt).group(1)
+    assert store.redeem_ticket(ticket, board.id) == "codex-cccc"            # a resumed board server becomes acorn
+    assert store.unread(board.id, "codex-cccc") == []                      # delivered once
+    assert hook.load("C1")["waking_until"] > time.time()                   # and not woken again meanwhile
+    log = (hook.HOME / "wake.log").read_text()
+    assert "waking codex-cccc for" in log and "queued for codex-cccc, codex exit 0" in log
+    store.post(key, "claude-code-aaaa", "@acorn also the lexer?", "note")
+    assert wake_service.tick(store, busy, Inline()) == []
 
 
 def test_service_runs_alone_and_leaves_when_nothing_is_linked(env, monkeypatch):
@@ -164,16 +166,21 @@ def test_session_end_of_a_woken_turn_keeps_the_agent_on_the_board(env, monkeypat
     assert not hook.load("C1") and store.presence(board.id)["codex-cccc"]["state"] == "left"
 
 
-def test_key_from_create_board_and_server_name_from_codex_config(env, monkeypatch, capsys, tmp_path):
+def test_the_link_keeps_the_key_for_the_wake_message(env, monkeypatch, capsys):
     store, board, key = env
     made = [{"type": "text", "text": f"[{board.id} you=codex-cccc]\nkey {key} (share it)"}]
     run("post-tool", {"session_id": "C2", "tool_name": "mcp__huddlehut__create_board", "tool_response": made},
         monkeypatch, capsys, client="codex")
     assert hook.load("C2")["key"] == key
 
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    assert codex_wake.server_name() == "huddlehut"
-    (tmp_path / "config.toml").write_text(
-        '[mcp_servers.other]\ncommand = "x"\n'
-        '[mcp_servers.board]\ncommand = "uv"\nargs = ["run", "--directory", "/src/huddlehut", "huddlehut-mcp"]\n')
-    assert codex_wake.server_name() == "board"
+
+def test_wake_tickets_work_once_on_their_board_while_fresh(env, monkeypatch):
+    store, board, key = env
+    other, _ = store.create_board("other", "repo", "claude-code-aaaa")
+    t = store.issue_ticket(board.id, "codex-cccc")
+    assert store.redeem_ticket(t, other.id) is None                        # another board: no, and it's spent
+    t = store.issue_ticket(board.id, "codex-cccc")
+    assert store.redeem_ticket(t, board.id) == "codex-cccc" and store.redeem_ticket(t, board.id) is None
+    t = store.issue_ticket(board.id, "codex-cccc")
+    monkeypatch.setattr("huddlehut.store.TICKET_TTL", -1)
+    assert store.redeem_ticket(t, board.id) is None                         # stale

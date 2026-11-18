@@ -69,6 +69,7 @@ KIND_ALIASES = {"update": "note", "thinking": "note", "plan": "status", "progres
                 "failed": "deadend", "reply": "answer", "todo": "promise", "will": "promise",
                 "commitment": "promise", "owe": "promise"}
 IDLE_AFTER = 900  # seconds without activity before an agent shows as idle
+TICKET_TTL = 3600  # how long a wake ticket stays good
 SESSION_TIMEOUT = float(os.environ.get("HUDDLEHUT_SESSION_TIMEOUT_DAYS", "3")) * 86400  # then it's ended
 
 CUTE_NAMES = ("mochi", "pebble", "sprout", "biscuit", "dumpling", "noodle", "pickle", "waffle", "acorn", "button",
@@ -191,6 +192,9 @@ CREATE TABLE IF NOT EXISTS identities (
     client TEXT PRIMARY KEY, agent TEXT NOT NULL, created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS wake_tickets (
+    token TEXT PRIMARY KEY, board_id TEXT NOT NULL, agent TEXT NOT NULL, created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS milestones (
     id INTEGER PRIMARY KEY AUTOINCREMENT, board_id TEXT NOT NULL REFERENCES boards(id), text TEXT NOT NULL,
     position REAL NOT NULL, created_by TEXT NOT NULL, created_at REAL NOT NULL, done_by TEXT, done_at REAL
@@ -245,6 +249,8 @@ POSTGRES_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS identities (
         client TEXT PRIMARY KEY, agent TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL)""",
     "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    """CREATE TABLE IF NOT EXISTS wake_tickets (
+        token TEXT PRIMARY KEY, board_id TEXT NOT NULL, agent TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS milestones (
         id BIGSERIAL PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), text TEXT NOT NULL,
         position DOUBLE PRECISION NOT NULL, created_by TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL,
@@ -819,6 +825,24 @@ class Store:
     def remember_identity(self, client: str, agent: str) -> None:
         self.db.execute("INSERT INTO identities (client, agent, created_at) VALUES (?, ?, ?)"
                         " ON CONFLICT (client) DO UPDATE SET agent = excluded.agent", (client, agent, time.time()))
+
+    def issue_ticket(self, board_id: str, agent: str) -> str:
+        """A one-time ticket that lets whoever presents it on this board become this agent. The wake
+        service hands one to an idle Codex agent with its wake message: if Codex resumes the thread with a
+        fresh board server, join_board(ticket=...) gets the agent its identity back."""
+        now = time.time()
+        self.db.execute("DELETE FROM wake_tickets WHERE created_at < ?", (now - TICKET_TTL,))
+        token = f"wk_{secrets.token_urlsafe(9)}"
+        self.db.execute("INSERT INTO wake_tickets (token, board_id, agent, created_at) VALUES (?, ?, ?, ?)",
+                        (token, board_id, agent, now))
+        return token
+
+    def redeem_ticket(self, token: str, board_id: str) -> str | None:
+        """The agent a ticket stands for, if it's for this board and still fresh. Each ticket works once."""
+        row = self._one("SELECT agent FROM wake_tickets WHERE token = ? AND board_id = ? AND created_at >= ?",
+                        (token, board_id, time.time() - TICKET_TTL))
+        self.db.execute("DELETE FROM wake_tickets WHERE token = ?", (token,))
+        return row["agent"] if row else None
 
     def dormant_holder(self, board_id: str, nickname: str, tool: str) -> str | None:
         """The agent of the same tool that held this nickname here and has since gone idle or left: most

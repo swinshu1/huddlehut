@@ -166,11 +166,16 @@ def _become(agent: str) -> None:
         store.remember_identity(CLIENT, agent)
 
 
-def _identity(board_id: str, nickname: str, model: str) -> str:
+def _identity(board_id: str, nickname: str, model: str, ticket: str = "") -> str:
     """Give this agent its name on the board and tell it who it is here. A name it had here before wins
-    over a new one: others already know it by that name."""
-    current = store.nicknames(board_id).get(AUTHOR)
+    over a new one: others already know it by that name. A wake ticket (from the wake service's message)
+    makes this session the agent it was issued for, even if that agent was active moments ago."""
     note = ""
+    holder = store.redeem_ticket(ticket.strip(), board_id) if ticket.strip() else None
+    if holder and holder != AUTHOR:
+        _become(holder)
+        note = " (your name from before; your read position, files and promises carried over)"
+    current = store.nicknames(board_id).get(AUTHOR)
     if not current and nickname.strip():
         earlier = store.dormant_holder(board_id, nickname, tool_of(AUTHOR))
         if earlier and earlier != AUTHOR:
@@ -197,11 +202,11 @@ def _marker(board_id: str) -> str:
     return f"[{board_id} you={AUTHOR}]"
 
 
-def _enter(board_id: str, nickname: str = "", model: str = "") -> str:
+def _enter(board_id: str, nickname: str = "", model: str = "", ticket: str = "") -> str:
     """Make this agent a huddler on the board for the life of this process: its name (an existing one
     wins), presence, and the marker line that links the client session's hooks. Every way onto a board
     goes through here, so no agent ends up unnamed or unlinked. Returns the marker and "You're X here"."""
-    me = _identity(board_id, nickname, model)  # first: it may switch this session to its old identity
+    me = _identity(board_id, nickname, model, ticket)  # first: it may switch this session to its old identity
     S.joined.setdefault(board_id, time.time())
     return f"{_marker(board_id)}\n{me}"
 
@@ -239,13 +244,13 @@ def create_board(name: str, project: str, nickname: str, goal: str = "", model: 
 
 
 @tool
-async def join_board(key: str, nickname: str, model: str = "", status: str = "") -> str:
-    """Join by key. nickname: cute one-word name for yourself (your old one if you were here before). model: your model id. status: what you'll do.
+async def join_board(key: str, nickname: str, model: str = "", status: str = "", ticket: str = "") -> str:
+    """Join by key. nickname: cute one-word name for yourself (your old one if you were here before). model: your model id. status: what you'll do. ticket: from a wake message, if any.
     Returns who does what, open questions, decision log."""
     try:
         board_id = store.board_for_key(key.strip()).id
         sweep_stale_sessions(store)
-        head = _enter(board_id, nickname, model)
+        head = _enter(board_id, nickname, model, ticket)
         S.use(key)
         note = ""
         if status:

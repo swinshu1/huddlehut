@@ -116,3 +116,31 @@ def test_nickname_is_required(db_url):
             assert re.search(r"You're [a-z-]+ here \(you didn't pick a nickname; you got this one\)\.", created)
 
     anyio.run(run)
+
+
+def test_wake_ticket_brings_back_an_identity_that_is_still_active(db_url):
+    """A Codex thread resumed by the app-server daemon gets a fresh board server. The wake message's ticket
+    gets it the agent's identity back, even moments after that agent was active (when a nickname alone
+    would be refused as someone else)."""
+
+    async def run():
+        async with stdio_client(_params(db_url, "codex")) as (r, w), ClientSession(r, w) as first:
+            await first.initialize()
+            created = await _call(first, "create_board", name="b", project="p", nickname="acorn")
+            key = re.search(r"brd_\S+", created).group(0)
+            old = _marker_agent(created)
+        store = Store(db_url)
+        ticket = store.issue_ticket(store.board_for_key(key).id, old)
+
+        async with stdio_client(_params(db_url, "codex")) as (r, w), ClientSession(r, w) as woken:
+            await woken.initialize()
+            back = await _call(woken, "join_board", key=key, nickname="acorn", ticket=ticket)
+            assert _marker_agent(back) == old
+            assert "You're acorn here (your name from before; your read position, files and promises carried over)." in back
+
+        async with stdio_client(_params(db_url, "codex")) as (r, w), ClientSession(r, w) as later:
+            await later.initialize()
+            again = await _call(later, "join_board", key=key, nickname="acorn", ticket=ticket)   # spent
+            assert _marker_agent(again) != old and "'acorn' is taken" in again
+
+    anyio.run(run)
