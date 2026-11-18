@@ -728,6 +728,24 @@ class Store:
             (board_id, agent, time.time()),
         )
 
+    def end_session(self, board_id: str, agent: str, by: str = "user") -> Message | None:
+        """End an agent's session on a board by hand (e.g. it died without a clean exit): mark it
+        left, free its files, unpin it, and tell the board. If it's still alive, it reappears when
+        it next acts."""
+        board = self.get_board(board_id)
+        name = self.labels(board_id).get(agent) or short_id(agent)
+        self.mark_left(board_id, agent)
+        self.release(board_id, agent, ["*"])
+        self.set_waiting(board_id, agent, None)
+        if board.status != "open":
+            return None
+        promises = [m for m in self.open_items(board_id) if m.kind == "promise" and m.author == agent]
+        if promises:
+            ids = ", ".join(f"#{m.id}" for m in promises[:3])
+            return self.post_to(board, by, f"{name}'s session was ended by the {by}. Unkept promise: {ids}. "
+                                           "Pick it up or re-plan.", "blocker")
+        return self.post_to(board, by, f"{name}'s session was ended by the {by}; its files are free.", "note")
+
     def presence(self, board_id: str) -> dict[str, dict]:
         return {r["agent"]: dict(r) for r in self._all("SELECT * FROM presence WHERE board_id=?", (board_id,))}
 
