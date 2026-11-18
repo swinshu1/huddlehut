@@ -12,7 +12,8 @@ One entry point for Claude Code and Codex (`--client` picks the output format):
                  with an explanation. Running the same command again goes through.
   session-start  after compaction or resume: re-injects the board view (no model call).
   stop           before the agent ends its turn: if a question, blocker or reply to it is unread, or
-                 it has an open promise it hasn't been reminded of, keeps it going once.
+                 it has an open promise it hasn't been reminded of, keeps it going once. When it lets
+                 a Codex agent stop, starts a background waiter that can wake it (codex_wake.py).
   session-end    marks the agent as left; if it leaves promises unkept, posts a blocker saying so,
                  so nobody waits forever.
   wait           Claude Code only, as an asyncRewake Stop hook: after the agent goes idle, waits up
@@ -37,6 +38,7 @@ from pathlib import Path
 HOME = Path(os.environ.get("HUDDLEHUT_HOME", Path.home() / ".huddlehut"))
 SESSIONS = HOME / "sessions"
 MARKER = re.compile(r"\[(b_[0-9a-f]{8}) you=([\w.-]+)\]")
+KEY = re.compile(r"\bbrd_[\w-]{16,}")
 BOARD_TOOL = re.compile(r"^mcp__.*huddlehut.*__")
 RISKY_GIT = re.compile(r"\bgit\b.*\b(commit|stash|reset|checkout|restore|clean)\b")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}  # Claude Code; Codex edits via apply_patch
@@ -303,11 +305,20 @@ def post_tool(inp: dict, client: str) -> dict | None:
     cwd = inp.get("cwd")
     now = time.time()
     if BOARD_TOOL.match(tool):
-        m = MARKER.search(json.dumps(inp.get("tool_response"), ensure_ascii=False))
+        response = json.dumps(inp.get("tool_response"), ensure_ascii=False)
+        m = MARKER.search(response)
         state = load(sid)
         if m:
             head = _head(cwd)
-            state = {"board": m.group(1), "me": m.group(2), "checked": 0, "last_sha": head[0] if head else None}
+            # rejoining the same board keeps what the hooks track; a Codex wake in progress belongs to the thread
+            same = state.get("board") == m.group(1) and state.get("me") == m.group(2)
+            keep = state if same else {k: v for k, v in state.items() if k == "waking_until"}
+            state = {**keep, "board": m.group(1), "me": m.group(2), "checked": 0,
+                     "last_sha": head[0] if head else None}
+            # kept so a Codex wake can tell the agent how to rejoin (the database stores keys hashed)
+            key = KEY.search(str((inp.get("tool_input") or {}).get("key", ""))) or KEY.search(response)
+            if key:
+                state["key"] = key.group(0)
         if state:
             state["active"] = now
             save(sid, state)
@@ -496,6 +507,15 @@ def session_start(inp: dict, client: str) -> dict | None:
 
 
 def stop(inp: dict, client: str) -> dict | None:
+    out = _stop(inp, client)
+    if out is None and client == "codex":
+        from . import codex_wake
+
+        codex_wake.spawn(inp)  # Codex can't be rewoken by a hook; a background waiter resumes it instead
+    return out
+
+
+def _stop(inp: dict, client: str) -> dict | None:
     if inp.get("stop_hook_active"):
         return None  # already continued once for this stop; don't loop
     sid = inp.get("session_id") or ""
@@ -536,8 +556,8 @@ def stop(inp: dict, client: str) -> dict | None:
 def session_end(inp: dict, client: str) -> dict | None:
     sid = inp.get("session_id") or ""
     state = load(sid)
-    if not state:
-        return None
+    if not state or state.get("waking_until", 0) > time.time():
+        return None  # not on a board, or a headless wake turn ended: the agent's own thread lives on
     store = _store()
     store.mark_left(state["board"], state["me"])
     store.set_waiting(state["board"], state["me"], None)
@@ -557,6 +577,21 @@ def wait(inp: dict, client: str) -> int:
     state = load(sid)
     if not state or awaiting_user(inp.get("last_assistant_message")):
         return 0  # not on a board, or waiting on the user: don't wake it before they answer
+    found = watch(sid)
+    if not found:
+        return 0
+    store, _, msgs = found
+    print("[huddlehut] new on the board for you:\n" + _render(store, msgs) + "\n" + USER_QUIET, file=sys.stderr)
+    return 2
+
+
+def watch(sid: str):
+    """After a linked session goes idle, wait up to WAIT_SECONDS for something that needs it.
+    Returns (store, state, msgs) with the cursor moved past msgs, or None if the agent started working
+    again (post-tool delivers then), a newer watcher took over, or the board closed."""
+    state = load(sid)
+    if not state:
+        return None
     token, started = uuid.uuid4().hex, time.time()
     state["waiter"] = token
     save(sid, state)
@@ -565,16 +600,15 @@ def wait(inp: dict, client: str) -> int:
     while time.time() - started < WAIT_SECONDS:
         state = load(sid)
         if not state or state.get("waiter") != token or state.get("active", 0) > started:
-            return 0  # a newer waiter took over, or the agent is working again (post-tool delivers)
+            return None
         msgs = store.unread(state["board"], state["me"])
         if _needs_me(store, state["board"], state["me"], msgs):
             store.set_cursor(state["board"], state["me"], msgs[-1].id)
-            print("[huddlehut] new on the board for you:\n" + _render(store, msgs) + "\n" + USER_QUIET, file=sys.stderr)
-            return 2
+            return store, state, msgs
         if store.get_board(state["board"]).status != "open":
-            return 0
+            return None
         time.sleep(WAIT_POLL)
-    return 0
+    return None
 
 
 EVENTS = {"post-tool": post_tool, "pre-tool": pre_tool, "session-start": session_start, "stop": stop,

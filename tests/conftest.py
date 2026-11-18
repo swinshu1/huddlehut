@@ -29,3 +29,8 @@ def store(db_url):
     from huddlehut.store import Store
 
     return Store(db_url)
+
+
+@pytest.fixture(autouse=True)
+def _no_codex_wake(monkeypatch):
+    monkeypatch.setenv("HUDDLEHUT_CODEX_WAKE", "0")  # never resume a real Codex thread from a test
