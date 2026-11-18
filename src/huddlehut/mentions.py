@@ -30,8 +30,11 @@ def mention_names(me: str, others) -> set[str]:
 
 def mentions(text: str, names: set[str]) -> bool:
     """Whether text addresses an agent known by these names (or everyone)."""
-    if EVERYONE.search(text):
-        return True
+    return bool(EVERYONE.search(text)) or names_in(text, names)
+
+
+def names_in(text: str, names) -> bool:
+    """Whether text names any of these (with or without the @), everyone-words aside."""
     return any(re.search(rf"(?<![\w-])@?{re.escape(n)}(?![\w-])", text, re.I) for n in names)
 
 

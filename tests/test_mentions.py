@@ -58,3 +58,25 @@ def test_plain_chatter_does_not_wake_or_hold(env, repo, monkeypatch, capsys):
     out = run("stop", {"session_id": "S1"}, monkeypatch, capsys)
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "rerun the milestone check" in ctx and ctx.endswith("tell them only if they need to act or decide.")
+
+
+def test_a_question_wakes_only_the_agents_it_names(store):
+    """A question or blocker for someone else isn't yours to answer: it doesn't wake you. One that names
+    no agent is for anyone, and mentions, @all and replies to your posts always reach you."""
+    from huddlehut.hook import _needs_me
+
+    board, key = store.create_board("b", "p", "claude-code-aaaa")
+    for agent, nick in (("claude-code-aaaa", "mochi"), ("codex-bbbb", "otter"), ("claude-code-cccc", "pebble")):
+        store.set_nickname(board.id, agent, nick)
+    mine = store.post(key, "claude-code-aaaa", "lexer done", "result")
+    posts = [
+        store.post(key, "codex-bbbb", "@pebble which accounts did you create?", "question"),
+        store.post(key, "codex-bbbb", "anyone know the payout rules?", "question"),
+        store.post(key, "codex-bbbb", "mochi: need the login code", "blocker"),
+        store.post(key, "codex-bbbb", "@all ship today?", "question"),
+        store.post(key, "codex-bbbb", "nice", "note", reply_to=mine.id),
+        store.post(key, "codex-bbbb", "pilot negative, moving on", "result"),
+    ]
+    woken = lambda agent: [posts.index(m) for m in _needs_me(store, board.id, agent, store.unread(board.id, agent))]  # noqa: E731
+    assert woken("claude-code-aaaa") == [1, 2, 3, 4]
+    assert woken("claude-code-cccc") == [0, 1, 3]
