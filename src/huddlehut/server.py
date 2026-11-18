@@ -24,7 +24,7 @@ from mcp.server.mcpserver import MCPServer
 
 from .compact import join_board as _join
 from .claims import normalize
-from .compact import render_entries, render_files, render_progress
+from .compact import render_entries, render_files, render_progress, render_view
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
 from .store import USER, BoardError, Store, tool_of
 
@@ -210,8 +210,33 @@ def _identity(board_id: str, nickname: str, model: str) -> str:
 
 
 def _marker(board_id: str) -> str:
-    """First line of create/join results; hooks read it to link the client session to the board."""
+    """Hooks read it from a board tool's result to link the client session to the board."""
     return f"[{board_id} you={AUTHOR}]"
+
+
+def _enter(board_id: str, nickname: str = "", model: str = "") -> str:
+    """Make this agent a huddler on the board for the life of this process: its name (an existing one
+    wins), presence, and the marker line that links the client session's hooks. Every way onto a board
+    goes through here, so no agent ends up unnamed or unlinked. Returns the marker and "You're X here"."""
+    me = _identity(board_id, nickname, model)  # first: it may switch this session to its old identity
+    S.joined.setdefault(board_id, time.time())
+    return f"{_marker(board_id)}\n{me}"
+
+
+def _board(key: str, view: bool = True):
+    """The board a tool acts on: the given key, else this session's current one. The first use of a
+    board in this process enters it like join_board does (an agent that kept the key across a restart
+    may skip join_board), and with view=True shows it, reading on from there. Returns (key, board, preamble)."""
+    k = S.use(key)
+    board = store.board_for_key(k)
+    if board.id in S.joined or board.status != "open":
+        return k, board, ""
+    head = _enter(board.id)
+    if not view:
+        return k, board, head + "\n"
+    text, last_id = render_view(store, board)  # the plain view: a tool call never waits on summarizing
+    store.set_cursor(board.id, AUTHOR, last_id)
+    return k, board, f"{head} You're on the board now (no need to join_board).\n{text}\n---\n"
 
 
 S = Session()
@@ -224,7 +249,7 @@ def create_board(name: str, project: str, nickname: str, goal: str = "", model: 
     board, key = store.create_board(name, project, AUTHOR, goal)
     S.use(key)
     store.set_cursor(board.id, AUTHOR, 0)
-    out = f"{_marker(board.id)}\n{_identity(board.id, nickname, model)}\nCreated. Key: {key}\nGive user key for other sessions. Not recoverable."
+    out = f"{_enter(board.id, nickname, model)}\nCreated. Key: {key}\nGive user key for other sessions. Not recoverable."
     if existing:
         out += f"\nOther open boards {project}: " + ", ".join(f"{b.name} ({b.id})" for b in existing[:5])
     return out
@@ -237,16 +262,14 @@ async def join_board(key: str, nickname: str, model: str = "", status: str = "")
     try:
         board_id = store.board_for_key(key.strip()).id
         sweep_stale_sessions(store)
-        me = _identity(board_id, nickname, model)   # first: it may switch this session to its old identity
+        head = _enter(board_id, nickname, model)
         S.use(key)
         note = ""
         if status:
             note = _held_note(store.post(key, AUTHOR, status, kind="status"))
         text, last_id = await asyncio.to_thread(_join, store.url, key)
-        board = store.board_for_key(key)
-        S.joined.setdefault(board.id, time.time())
-        store.set_cursor(board.id, AUTHOR, last_id)
-        return f"{_marker(board.id)}\n{me}\n{text}{note}"
+        store.set_cursor(board_id, AUTHOR, last_id)
+        return f"{head}\n{text}{note}"
     except BoardError as e:
         return f"error: {e}"
 
@@ -255,13 +278,13 @@ async def join_board(key: str, nickname: str, model: str = "", status: str = "")
 def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "") -> str:
     """kind: status|decision|question|answer|blocker|promise|result|deadend|note. reply_to: id answered/kept. Returns others' new msgs."""
     try:
-        k = S.use(key)
+        k, _, pre = _board(key)
         m = store.post(k, AUTHOR, content, kind, reply_to or None)
         new, _, _ = S.inbox(k)
     except BoardError as e:
         return f"error: {e}"
     news = "\nNew:\n" + _flag_mentions(m.board_id, new, render_entries(store, new)) if new else ""
-    return f"ok #{m.id}" + _held_note(m) + _unknown_mentions(m.board_id, content) + news + S.nudge(m.board_id)
+    return pre + f"ok #{m.id}" + _held_note(m) + _unknown_mentions(m.board_id, content) + news + S.nudge(m.board_id)
 
 
 @tool
@@ -269,7 +292,7 @@ def files(claim: list[str] | None = None, lock: list[str] | None = None, unlock:
           release: list[str] | None = None, key: str = "") -> str:
     """Shared file inventory. claim: files/globs you're starting on. lock: claim + block others' edits (lapses if you go idle or leave). unlock: keep claim, drop lock. release: done ("*" = all). Returns who holds what."""
     try:
-        board = store.board_for_key(S.use(key))
+        _, board, pre = _board(key, view=False)
         top = (store.presence(board.id).get(AUTHOR) or {}).get("toplevel")
 
         def norm(paths):
@@ -286,14 +309,14 @@ def files(claim: list[str] | None = None, lock: list[str] | None = None, unlock:
                 lines.append(f"not {'locked' if locking else 'claimed'}: {path} held by {holder}. Ask them first.")
     except BoardError as e:
         return f"error: {e}"
-    return "\n".join(lines + [render_files(store, board.id) or "(no files claimed)"])
+    return pre + "\n".join(lines + [render_files(store, board.id) or "(no files claimed)"])
 
 
 @tool
 async def read_messages(wait_seconds: int = 0, since_id: int = -1, key: str = "") -> str:
     """Others' new msgs. wait_seconds<=50 blocks for one. since_id: reread from id."""
     try:
-        k = S.use(key)
+        k, _, pre = _board(key)
         if since_id >= 0:
             store.set_cursor(store.board_for_key(k).id, AUTHOR, since_id, rewind=True)
         deadline = time.monotonic() + min(max(wait_seconds, 0), 50)
@@ -307,7 +330,7 @@ async def read_messages(wait_seconds: int = 0, since_id: int = -1, key: str = ""
     tail = "" if status == "open" else f" (board {status})"
     board_id = store.board_for_key(k).id
     body = _flag_mentions(board_id, new, render_entries(store, new)) if new else "(nothing new)"
-    return body + f"\nlast_id={last}{tail}" + S.nudge(board_id)
+    return pre + body + f"\nlast_id={last}{tail}" + S.nudge(board_id)
 
 
 def _milestone_id(x) -> int:
@@ -322,8 +345,7 @@ def goal(done: list[int | str] | None = None, undo: list[int | str] | None = Non
          key: str = "") -> str:
     """Board's shared goal + milestones. done: milestone ids you finished. undo: reopen. add: new milestones. Returns progress."""
     try:
-        k = S.use(key)
-        board = store.board_for_key(k)
+        k, board, pre = _board(key, view=False)
         finished, reopened = [], []
         for x in done or []:
             m = store._milestone(board.id, _milestone_id(x))
@@ -345,14 +367,14 @@ def goal(done: list[int | str] | None = None, undo: list[int | str] | None = Non
     except BoardError as e:
         return f"error: {e}"
     lines = [f"goal: {board.goal}" if board.goal else "", render_progress(store, board.id)]
-    return "\n".join(ln for ln in lines if ln) or "(no goal or milestones yet)"
+    return pre + ("\n".join(ln for ln in lines if ln) or "(no goal or milestones yet)")
 
 
 @tool
 def close_board(outcome: str = "", key: str = "") -> str:
     """Spin down when done. Saves lessons to memory. outcome: what worked/failed."""
     try:
-        k = S.use(key)
+        k, _, _ = _board(key, view=False)
         if outcome:
             store.post(k, AUTHOR, outcome, kind="result")
         board = store.close_board(k, AUTHOR, outcome)
