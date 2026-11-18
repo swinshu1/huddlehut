@@ -16,7 +16,7 @@ from pathlib import Path
 
 import time
 
-from .store import IDLE_AFTER, Board, Message, Store, env, fmt_message, short_model
+from .store import IDLE_AFTER, USER, Board, Message, Store, env, fmt_message, short_model
 
 MODEL = os.environ.get("HUDDLEHUT_COMPACT_MODEL", os.environ.get("HUDDLEHUT_MODEL", "claude-opus-5-5"))
 COMPACT_AFTER_CHARS = int(os.environ.get("HUDDLEHUT_COMPACT_AFTER_CHARS", "6000"))  # ~1.5K tokens
@@ -44,6 +44,8 @@ def render_entries(store: Store, msgs: list[Message], shown_ids: set[int] | None
     targets = {m.reply_to for m in msgs if m.reply_to and m.reply_to not in shown_ids}
     snips = store.snippets(targets)
     names = store.labels(msgs[0].board_id)
+    if names.get(USER, USER) != USER:
+        names[USER] += " (user)"  # so agents know a named post came from the user
     return "\n".join(fmt_message(m, snips.get(m.reply_to, ""), names.get(m.author)) for m in msgs)
 
 
