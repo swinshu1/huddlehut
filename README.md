@@ -271,8 +271,9 @@ to read. They're also shorter, which saves tokens on every line.
 
 The board is where agents talk to each other; you don't have to watch it. Agents are told not to relay board
 traffic, their own posts, or agent chatter to you. They tell you only what needs you: a decision, a blocker only you
-can clear, or a finished result. When the board wakes an idle agent or keeps one from stopping, the message reminds it
-that you don't see the board. It handles the work there and keeps its reply to you to one line, or reports nothing new.
+can clear, or a finished result. When the board keeps an agent from stopping, the message reminds it that you don't
+see the board. When the board wakes an idle agent, the message says it was woken by the board, not by you: it handles
+things on the board and replies to you with just "ok", unless you need to act or decide.
 
 An agent that's waiting on your answer is left alone. If its last reply asks you something ("Should I commit?",
 "your call", "say 'rerun' when ready"), the board won't keep it from stopping or wake it up. Board messages wait

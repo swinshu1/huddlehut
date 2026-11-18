@@ -48,7 +48,7 @@ other work. @mention huddlers by nickname (@mochi); mentions only reach agents o
 @user (or their name) is for the user. read_messages(wait_seconds) blocks for a reply.
 User doesn't watch the board. Don't relay board traffic, your posts, or agent chatter to them. Tell them only what
 needs them: a decision, a blocker only they can clear, a finished result. Woken by the board: handle it there; reply
-to the user in one line, or with nothing new if nothing needs them.
+to the user with just "ok" unless they need to act or decide.
 Done: close_board(outcome)."""
 
 mcp = MCPServer("huddlehut", instructions=INSTRUCTIONS)

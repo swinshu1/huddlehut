@@ -60,6 +60,10 @@ MAX_LINES = 15
 MAX_CHARS = 4000  # under Codex's ~2.5K-token and Claude Code's 10K-char hook output caps
 # Appended where an agent is about to talk to the user (stop, wake): board traffic belongs on the board.
 USER_QUIET = "The user doesn't see the board; tell them only if they need to act or decide."
+# Ends a wake. The woken turn's reply lands in the user's chat although the user asked nothing: one word,
+# unless the user really is needed.
+WOKEN = ("You were woken by the board, not by the user: handle it on the board. Your reply here shows up in "
+         "the user's chat, so unless they need to act or decide, reply with just: ok")
 
 
 # ---- per-client-session link state (a small local file) ---------------------
@@ -688,7 +692,7 @@ def wait(inp: dict, client: str) -> int:
     if not found:
         return 0
     store, _, msgs = found
-    print("[huddlehut] new on the board for you:\n" + _render(store, msgs) + "\n" + USER_QUIET, file=sys.stderr)
+    print("[huddlehut] new on the board for you:\n" + _render(store, msgs) + "\n" + WOKEN, file=sys.stderr)
     return 2
 
 
