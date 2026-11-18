@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .compact import presence_tag
 from .service import distill_in_background, sweep_stale_sessions
-from .store import IDLE_AFTER, BoardError, Message, Store, short_id, short_model
+from .store import IDLE_AFTER, MAX_POST_CHARS, BoardError, Message, Store, short_id, short_model
 
 
 USER_MENTION = re.compile(r"(?<![\w-])@(?:user|human)\b", re.I)
@@ -89,9 +89,50 @@ class Viewer:
                 "agents": agents,
                 "waiting": sorted(waiting, key=lambda w: w["at"] or 0, reverse=True),
                 "stream": stream,
+                "milestones": [{"id": m["id"], "text": m["text"], "done": bool(m["done_at"]), "done_at": m["done_at"],
+                                "done_by": m["done_by"], "done_by_name": names.get(m["done_by"]) or m["done_by"]}
+                               for m in s.milestones(b.id)],
                 "message_count": total,
                 "lessons": len(s.list_memories(board_id=b.id)),
             }
+
+    # ---- the board's goal: the user sets it and its milestones; changes show in the stream -------------
+
+    def _open_board(self, board_id: str):
+        b = self.store.get_board(board_id)
+        if b.status != "open":
+            raise BoardError("this board is closed; reopen it to change its goal")
+        return b
+
+    def set_goal(self, board_id: str, goal: str) -> dict:
+        goal = " ".join(goal.split())[:1000]
+        with self.lock:
+            b = self._open_board(board_id)
+            if goal != b.goal:
+                self.store.set_goal(b.id, goal)
+                # @all wakes every agent on the board: a new goal changes what they should be doing
+                text = f"@all new goal: {goal}" if goal else "@all goal cleared"
+                self.store.post_to(b, "user", text[:MAX_POST_CHARS], kind="decision")
+        return {"ok": True}
+
+    def add_milestone(self, board_id: str, text: str) -> dict:
+        with self.lock:
+            b = self._open_board(board_id)
+            m = self.store.add_milestone(b.id, text, "user")
+            self.store.post_to(b, "user", f"milestone added: {m['text']}", kind="note")
+        return {"ok": True}
+
+    def update_milestone(self, board_id: str, mid: int, done: bool | None = None, delete: bool = False) -> dict:
+        with self.lock:
+            b = self._open_board(board_id)
+            m = self.store._milestone(b.id, mid)
+            if delete:
+                self.store.delete_milestone(b.id, mid)
+            elif done is not None and done != bool(m["done_at"]):
+                self.store.set_milestone_done(b.id, mid, "user", done=done)
+                self.store.post_to(b, "user", f"milestone {'done' if done else 'reopened'}: {m['text']}",
+                                   kind="result" if done else "note")
+        return {"ok": True}
 
     def close_board(self, board_id: str, outcome: str = "") -> dict:
         with self.lock:
@@ -151,13 +192,22 @@ def make_handler(viewer: Viewer):
             try:
                 length = min(int(self.headers.get("Content-Length") or 0), 10_000)
                 body = json.loads(self.rfile.read(length) or b"{}") if length else {}
-                if len(parts) == 6 and parts[:2] == ["api", "boards"] and parts[3] == "agents" and parts[5] == "end":
-                    self._json(viewer.end_session(parts[2], parts[4]))
-                elif len(parts) == 4 and parts[:2] == ["api", "boards"] and parts[3] == "close":
-                    self._json(viewer.close_board(parts[2], str(body.get("outcome") or "")))
-                else:
-                    self._json({"error": "this viewer doesn't know that action; it may be out of date. "
-                                         "Restart huddlehut view"}, 404)
+                match parts:
+                    case ["api", "boards", b, "agents", agent, "end"]:
+                        self._json(viewer.end_session(b, agent))
+                    case ["api", "boards", b, "close"]:
+                        self._json(viewer.close_board(b, str(body.get("outcome") or "")))
+                    case ["api", "boards", b, "goal"]:
+                        self._json(viewer.set_goal(b, str(body.get("goal") or "")))
+                    case ["api", "boards", b, "milestones"]:
+                        self._json(viewer.add_milestone(b, str(body.get("text") or "")))
+                    case ["api", "boards", b, "milestones", mid]:
+                        done = body.get("done")
+                        self._json(viewer.update_milestone(b, int(mid), None if done is None else bool(done),
+                                                           delete=bool(body.get("delete"))))
+                    case _:
+                        self._json({"error": "this viewer doesn't know that action; it may be out of date. "
+                                             "Restart huddlehut view"}, 404)
             except BoardError as e:
                 self._json({"error": str(e)}, 404)
             except ValueError:

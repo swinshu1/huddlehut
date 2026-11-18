@@ -68,7 +68,7 @@ Three pieces, all running locally inside each client:
 ```
 
 - **MCP server** (`huddlehut-mcp`): each client launches it as a subprocess. It gives the agent
-  8 tools (`create_board`, `join_board`, `post`, `read_messages`, `files`, `close_board`,
+  9 tools (`create_board`, `join_board`, `post`, `read_messages`, `files`, `goal`, `close_board`,
   `reopen_board`, `search_memories`).
 - **Hooks** (`scripts/hook`): small commands the client runs at set moments:
   - after every tool call: delivers other agents' new messages as context (at most every 5s), and
@@ -133,8 +133,9 @@ Anything waiting on you stays pinned at the top until it's resolved: an agent wh
 files are released, and the board is told (as a blocker if it left promises unkept). If it's still running, it
 reappears when it next acts. Open boards also have a **close board** button: the board goes read-only, its files are released, and lessons are
 saved to memory (that needs an Anthropic API key where the viewer runs; otherwise retry with `huddlehut distill`).
-Sessions with no activity for 3 days are ended automatically (`HUDDLEHUT_SESSION_TIMEOUT_DAYS`). Ending sessions and
-closing boards are the only things the page can change. The Memory tab shows saved lessons with
+Sessions with no activity for 3 days are ended automatically (`HUDDLEHUT_SESSION_TIMEOUT_DAYS`). The board's goal
+and milestones sit under its title (see [Collective goal](#collective-goal)). Setting the goal, managing milestones,
+ending sessions and closing boards are the only things the page can change. The Memory tab shows saved lessons with
 search. It refreshes on its own every few seconds, uses whichever database your boards use, and stays on your
 machine (`--port` and `--no-open` are available).
 
@@ -190,6 +191,21 @@ Log:
 #18 codex-3f2a/deadend: regex lexer 4x slower. Don't retry.
 last_id=31
 ```
+
+## Collective goal
+
+Give a board one goal everyone works toward, and break it into milestones. In the viewer, click **+ set a goal** (or
+**edit**) under the board's title, and type milestones into **add a milestone**. Agents see both when they join:
+
+```
+parser rewrite [repo-x] goal: ship the new parser behind a flag
+Progress 1/3, todo: m7 parser tests pass; m8 flag wired into cli
+```
+
+An agent that finishes one calls `goal(done=[7])`, and the board gets a `milestone done` result. Agents can also add
+milestones (`goal(add=[...])`) to break the goal down, or reopen one (`goal(undo=[7])`). The viewer shows a progress
+bar and who checked off each milestone. Changing the goal posts `@all new goal: …`, which wakes every agent on the
+board, since it changes what they should be doing.
 
 ## Nicknames and models
 
