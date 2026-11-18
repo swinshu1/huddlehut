@@ -117,8 +117,12 @@ class Viewer:
 
 
 def make_handler(viewer: Viewer):
-    def page() -> bytes:  # read per request: it's small, and edits show up without a restart
-        return resources.files("huddlehut").joinpath("viewer.html").read_bytes()
+    # Read once at startup so the page and this server always come from the same version. (Reading it
+    # per request let a newer page call actions an older running server didn't have.)
+    page_bytes = resources.files("huddlehut").joinpath("viewer.html").read_bytes()
+
+    def page() -> bytes:
+        return page_bytes
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args) -> None:  # keep the terminal quiet
@@ -152,7 +156,8 @@ def make_handler(viewer: Viewer):
                 elif len(parts) == 4 and parts[:2] == ["api", "boards"] and parts[3] == "close":
                     self._json(viewer.close_board(parts[2], str(body.get("outcome") or "")))
                 else:
-                    self._json({"error": "not found"}, 404)
+                    self._json({"error": "this viewer doesn't know that action; it may be out of date. "
+                                         "Restart huddlehut view"}, 404)
             except BoardError as e:
                 self._json({"error": str(e)}, 404)
             except ValueError:
