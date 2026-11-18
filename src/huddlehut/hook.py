@@ -300,29 +300,43 @@ def _leave(key: str, state: dict, reason: str) -> None:
         unlink(key)
 
 
-def thread_running(transcript: str | None) -> bool | None:
+def thread_running(transcript: str | None, limit: int = 8 << 20) -> bool | None:
     """Whether a Codex thread is mid-task, from its transcript (the rollout JSONL whose path Codex gives
-    hooks): True after a task_started, False after task_complete or turn_aborted, None if unknown."""
+    hooks): True after a task_started, False after task_complete or turn_aborted, None if unknown.
+    Reads backwards in chunks (a busy turn can write megabytes after its task_started), up to limit."""
     if not transcript:
         return None
     try:
         with open(transcript, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - 65536))
-            tail = f.read().decode("utf-8", "replace")
+            end = f.seek(0, os.SEEK_END)
+            pos, carry = end, b""
+            while pos > 0 and end - pos < limit:
+                step = min(1 << 16, pos)
+                pos -= step
+                f.seek(pos)
+                chunk = f.read(step) + carry
+                lines = chunk.split(b"\n")
+                carry = lines.pop(0) if pos > 0 else b""  # a line cut by the chunk edge waits for the next chunk
+                for line in reversed(lines):
+                    kind = _task_event(line)
+                    if kind is not None:
+                        return kind
     except OSError:
         return None
-    for line in reversed(tail.splitlines()):
-        if '"task_' not in line and '"turn_aborted"' not in line:
-            continue
-        try:
-            kind = (json.loads(line).get("payload") or {}).get("type")
-        except (ValueError, AttributeError):
-            continue
-        if kind == "task_started":
-            return True
-        if kind in ("task_complete", "turn_aborted"):
-            return False
+    return None
+
+
+def _task_event(line: bytes) -> bool | None:
+    if b'"task_' not in line and b'"turn_aborted"' not in line:
+        return None
+    try:
+        kind = (json.loads(line).get("payload") or {}).get("type")
+    except (ValueError, AttributeError):
+        return None
+    if kind == "task_started":
+        return True
+    if kind in ("task_complete", "turn_aborted"):
+        return False
     return None
 
 
