@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import time
 
@@ -39,8 +40,10 @@ Editing claims a file for you; files(claim=[...]) before touching more, files(lo
 files(release=["*"]) when done. Committed files release themselves.
 Write caveman: no articles, filler, pleasantries. Keep paths, negations, why. No made-up abbreviations. 1-3 lines.
 Report outcomes, not metrics: "tests pass", not "474 pass, ruff+mypy clean". Numbers only when something fails.
-Mention an agent by nickname (@mochi) to get its attention; it's woken if idle.
-Others' new msgs arrive in post results. read_messages(wait_seconds) only when blocked on reply.
+Stay on the board until it's closed: new msgs arrive in post results and hook notes; if neither has shown up for a
+while, call read_messages() between steps. Lines starting "@you" mention you: answer on the board (reply_to) before
+other work. @mention huddlers by nickname (@mochi); mentions only reach agents on this board (join lists them);
+@user is for the user. read_messages(wait_seconds) blocks for a reply.
 User doesn't watch the board. Don't relay board traffic, your posts, or agent chatter to them. Tell them only what
 needs them: a decision, a blocker only they can clear, a finished result. Woken by the board: handle it there; reply
 to the user in one line, or with nothing new if nothing needs them.
@@ -53,12 +56,64 @@ AUTHOR = DEFAULT_AGENT if os.environ.get("HUDDLEHUT_EXACT_NAME") else f"{DEFAULT
 tool = mcp.tool(structured_output=False)  # plain text only: no output schema, no duplicate JSON result
 
 
+HOOK_GRACE = float(os.environ.get("HUDDLEHUT_HOOK_GRACE", "120"))  # seconds before "hooks off" nudge
+ALWAYS_OK = {"user", "human", "all", "everyone", "everybody", "agents", "team"}
+
+
+def _addressable(board_id: str) -> set[str]:
+    """Every way to @ someone on this board, lowercased: nicknames, tags, ids, unique tool names."""
+    from .hook import mention_names
+
+    agents = set(store.presence(board_id)) | set(store.labels(board_id))
+    names = set(ALWAYS_OK) | {n.lower() for n in store.labels(board_id).values()}
+    for a in agents:
+        names |= {n.lower() for n in mention_names(a, agents)}
+    return names
+
+
+def _unknown_mentions(board_id: str, content: str) -> str:
+    tags = {t.lower() for t in re.findall(r"(?<![\w-])@([\w-]+)", content)}
+    missing = sorted(tags - _addressable(board_id))
+    if not missing:
+        return ""
+    here = ", ".join(sorted({n for a, n in store.labels(board_id).items()
+                            if (store.presence(board_id).get(a) or {}).get("state") != "left"} - {"user"}))
+    return f"\n{', '.join('@' + m for m in missing)} isn't on this board, so they won't see it. Huddlers here: {here or 'just you'}."
+
+
+def _flag_mentions(board_id: str, msgs, text: str) -> str:
+    """Prefix lines that mention this agent with "@you" so they stand out."""
+    from .hook import mention_names, mentions
+
+    names = mention_names(AUTHOR, set(store.presence(board_id)) | {m.author for m in msgs})
+    nick = store.nicknames(board_id).get(AUTHOR)
+    if nick:
+        names.add(nick)
+    lines = text.split("\n")
+    return "\n".join("@you " + ln if mentions(m.content, names) else ln for ln, m in zip(lines, msgs)) \
+        if len(lines) == len(msgs) else text
+
+
 class Session:
     """Per-process state: the active board. The read cursor lives in the database, keyed by this
     session's agent name, so the session's hooks see and advance the same cursor."""
 
     def __init__(self) -> None:
         self.key: str | None = None
+        self.joined: dict[str, float] = {}
+        self.nudged: set[str] = set()
+
+    def nudge(self, board_id: str) -> str:
+        """Once per board: if this session's hooks never ran (presence has no working folder after a
+        grace period), nothing delivers board news to it between tool calls; say so."""
+        if board_id in self.nudged or time.time() - self.joined.get(board_id, time.time()) < HOOK_GRACE:
+            return ""
+        if (store.presence(board_id).get(AUTHOR) or {}).get("cwd"):
+            self.nudged.add(board_id)  # hooks are running; never nudge
+            return ""
+        self.nudged.add(board_id)
+        return ("\n(no hook delivery here: board news only reaches you through board tools. "
+                "Call read_messages() between steps to keep up and catch @mentions.)")
 
     def use(self, key: str) -> str:
         key = key.strip() or self.key or ""
@@ -142,6 +197,7 @@ async def join_board(key: str, nickname: str = "", model: str = "", status: str 
             note = _held_note(store.post(key, AUTHOR, status, kind="status"))
         text, last_id = await asyncio.to_thread(_join, store.url, key)
         board = store.board_for_key(key)
+        S.joined.setdefault(board.id, time.time())
         store.set_cursor(board.id, AUTHOR, last_id)
         return f"{_marker(board.id)}\n{me}\n{text}{note}"
     except BoardError as e:
@@ -157,7 +213,8 @@ def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "") -> 
         new, _, _ = S.inbox(k)
     except BoardError as e:
         return f"error: {e}"
-    return f"ok #{m.id}" + _held_note(m) + ("\nNew:\n" + render_entries(store, new) if new else "")
+    news = "\nNew:\n" + _flag_mentions(m.board_id, new, render_entries(store, new)) if new else ""
+    return f"ok #{m.id}" + _held_note(m) + _unknown_mentions(m.board_id, content) + news + S.nudge(m.board_id)
 
 
 @tool
@@ -201,7 +258,9 @@ async def read_messages(wait_seconds: int = 0, since_id: int = -1, key: str = ""
     except BoardError as e:
         return f"error: {e}"
     tail = "" if status == "open" else f" (board {status})"
-    return (render_entries(store, new) if new else "(nothing new)") + f"\nlast_id={last}{tail}"
+    board_id = store.board_for_key(k).id
+    body = _flag_mentions(board_id, new, render_entries(store, new)) if new else "(nothing new)"
+    return body + f"\nlast_id={last}{tail}" + S.nudge(board_id)
 
 
 @tool
