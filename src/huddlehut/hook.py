@@ -60,10 +60,8 @@ MAX_LINES = 15
 MAX_CHARS = 4000  # under Codex's ~2.5K-token and Claude Code's 10K-char hook output caps
 # Appended where an agent is about to talk to the user (stop, wake): board traffic belongs on the board.
 USER_QUIET = "The user doesn't see the board; tell them only if they need to act or decide."
-# Ends a wake. The woken turn's reply lands in the user's chat although the user asked nothing: one word,
-# unless the user really is needed.
-WOKEN = ("You were woken by the board, not by the user: handle it on the board. Your reply here shows up in "
-         "the user's chat, so unless they need to act or decide, reply with just: ok")
+# Ends a wake: the woken turn's reply lands in the user's chat although the user asked nothing.
+WOKEN = 'Answer on the board. Reply here with just "ok" unless the user needs to act.'
 
 
 # ---- per-client-session link state (a small local file) ---------------------
@@ -373,6 +371,25 @@ def _seen(state: dict, inp: dict, client: str, now: float) -> None:
         state["transcript"] = inp["transcript_path"]
 
 
+RESTART_NAGS = 2  # board calls that get the rejoin hint before the link follows the new identity
+
+
+def _restarted(sid: str, state: dict, new: str) -> dict:
+    """This Codex thread's board server restarted (the app restarted, or the daemon resumed the thread)
+    and came back as a new agent, since Codex can't tell a server which thread it serves. Say how to
+    become the old agent again, with a one-time wake ticket, and keep the link on the old identity until
+    it does. Only here, not in every wake message: it's rare, and the hook sees it the moment it happens."""
+    store = _store()
+    nick = store.nicknames(state["board"]).get(state["me"]) or state["me"]
+    if not state.get("ticket") or time.time() - state.get("ticket_at", 0) > 1800:
+        state |= {"ticket": store.issue_ticket(state["board"], state["me"]), "ticket_at": time.time()}
+    state["restart_nags"] = state.get("restart_nags", 0) + 1
+    save(sid, state)
+    key = repr(state["key"]) if state.get("key") else "<your board key>"
+    return _context("PostToolUse", f"[huddlehut] Your board tools restarted and came back as someone new ({new}). "
+                    f"To stay {nick}: join_board(key={key}, nickname={nick!r}, ticket={state['ticket']!r})")
+
+
 def _went_idle(inp: dict) -> None:
     """A Codex thread ended its turn: mark it idle (and whether it waits on the user) and make sure
     the wake service runs, so the board can wake it later."""
@@ -406,13 +423,16 @@ def post_tool(inp: dict, client: str) -> dict | None:
         response = json.dumps(inp.get("tool_response"), ensure_ascii=False)
         m = MARKER.search(response)
         state = load(sid)
+        if m and client == "codex" and not parent and state.get("board") == m.group(1) \
+                and state.get("me") not in (None, m.group(2)) and state.get("restart_nags", 0) < RESTART_NAGS:
+            return _restarted(sid, state, m.group(2))
         if m:
             head = _head(cwd)
             # rejoining the same board keeps what the hooks track; a Codex wake in progress belongs to the thread
             same = state.get("board") == m.group(1) and state.get("me") == m.group(2)
             keep = state if same else {k: v for k, v in state.items() if k == "waking_until"}
-            state = {**keep, "board": m.group(1), "me": m.group(2), "checked": 0,
-                     "last_sha": head[0] if head else None}
+            state = {**{k: v for k, v in keep.items() if k not in ("restart_nags", "ticket", "ticket_at")},
+                     "board": m.group(1), "me": m.group(2), "checked": 0, "last_sha": head[0] if head else None}
             # kept so a Codex wake can tell the agent how to rejoin (the database stores keys hashed)
             key = KEY.search(json.dumps(inp.get("tool_input"))) or KEY.search(response)
             if key:
@@ -678,7 +698,8 @@ def wait(inp: dict, client: str) -> int:
     if not found:
         return 0
     store, _, msgs = found
-    print("[huddlehut] new on the board for you:\n" + _render(store, msgs) + "\n" + WOKEN, file=sys.stderr)
+    board = store.get_board(state["board"])
+    print(f"[huddlehut {board.name}] new for you:\n" + _render(store, msgs) + "\n" + WOKEN, file=sys.stderr)
     return 2
 
 

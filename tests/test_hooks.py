@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -198,3 +199,30 @@ def test_hook_trace_switch_file(env, monkeypatch, capsys):
     run("post-tool", bash("S9"), monkeypatch, capsys, client="codex")
     entry = json.loads((hook.HOME / "hook-trace.jsonl").read_text())
     assert (entry["event"], entry["client"], entry["input"]["tool_name"]) == ("post-tool", "codex", "Bash")
+
+
+def test_a_restarted_codex_board_server_is_told_how_to_get_its_name_back(env, monkeypatch, capsys):
+    """Codex can't tell a board server which thread it serves, so a thread whose server restarted comes back
+    as a new agent. The hook sees it on the next board call and hands over a ticket to become the old one."""
+    store, board, key = env
+    def join(me):
+        return run("post-tool", {"session_id": "T1", "tool_name": "mcp__huddlehut__join_board",
+                                 "tool_input": {"key": key, "nickname": "otter"},
+                                 "tool_response": [{"type": "text", "text": f"[{board.id} you={me}]"}]},
+                   monkeypatch, capsys, client="codex")[1]
+    assert join("codex-af18") is None
+    store.set_nickname(board.id, "codex-af18", "otter")
+
+    out = join("codex-9999")                                                 # the app restarted
+    hint = out["hookSpecificOutput"]["additionalContext"]
+    ticket = re.search(rf"join_board\(key='{key}', nickname='otter', ticket='(wk_[\w-]+)'\)", hint).group(1)
+    assert "came back as someone new (codex-9999)" in hint and hook.load("T1")["me"] == "codex-af18"
+    again = join("codex-9999")["hookSpecificOutput"]["additionalContext"]
+    assert ticket in again                                                   # one ticket, not one per call
+    assert store.redeem_ticket(ticket, board.id) == "codex-af18"
+
+    assert join("codex-af18") is None                                        # it rejoined as otter
+    assert "restart_nags" not in hook.load("T1") and "ticket" not in hook.load("T1")
+    for _ in range(2):
+        join("codex-7777")
+    assert join("codex-7777") is None and hook.load("T1")["me"] == "codex-7777"   # ignored twice: follow it

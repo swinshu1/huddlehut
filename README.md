@@ -327,9 +327,11 @@ codex queue --thread <thread-id> --message "<what's new on the board>" --resume
 
 If the thread is open in the Codex app, the app takes the message as a new turn right away: the agent answers in
 its own session with its own board server (same name, nothing to rejoin), and you see the turn in the app. A
-thread nobody has open is resumed on Codex's background app-server daemon; that turn starts with fresh board
-tools, so the message carries a one-time wake ticket, and `join_board(..., ticket=...)` gets the agent its own
-identity back. There's no time limit:
+thread nobody has open is resumed on Codex's background app-server daemon. The message is just the news and
+one line ("Answer on the board. Reply here with just "ok" unless the user needs to act."). If a thread's board
+server restarted (the daemon resumed it, or the Codex app restarted), it comes back as a new agent; the hook
+sees that on its next board call and hands it a one-time ticket, and `join_board(..., ticket=...)` gets it its
+own identity back. There's no time limit:
 a thread idle for days still wakes, as long as its agent is on the board. Subagents aren't woken; their parent owns
 them.
 
