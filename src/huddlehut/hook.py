@@ -41,7 +41,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .mentions import agent_names, mention_names, mentions, names_in
+from .mentions import needs as _needs_me  # noqa: F401  (hooks and the wake service ask it)
 
 HOME = Path(os.environ.get("HUDDLEHUT_HOME", Path.home() / ".huddlehut"))
 SESSIONS = HOME / "sessions"
@@ -241,27 +241,6 @@ def _render(store, msgs) -> str:
     if omitted:
         text = f"(+{omitted} earlier: read_messages(since_id={msgs[0].id - 1}))\n" + text
     return text
-
-
-def _needs_me(store, board_id: str, me: str, msgs) -> list:
-    """Unread messages that call for this agent: ones that mention it (or everyone), replies to its posts,
-    and questions or blockers that name no agent (anyone may answer). A question for someone else isn't
-    this agent's to answer, so it doesn't wake it or keep it from stopping."""
-    if not msgs:
-        return []
-    mine = {r["id"] for r in store._all("SELECT id FROM messages WHERE board_id=? AND author=?", (board_id, me))}
-    names = mention_names(me, set(store.presence(board_id)) | {m.author for m in msgs})
-    nick = store.nicknames(board_id).get(me)
-    if nick:
-        names.add(nick)
-    others = agent_names(store, board_id) - {n.lower() for n in names}
-
-    def for_me(m) -> bool:
-        if m.reply_to in mine or mentions(m.content, names):
-            return True
-        return m.kind in ("question", "blocker") and not names_in(m.content, others)
-
-    return [m for m in msgs if for_me(m)]
 
 
 def _open_promises(store, board_id: str, me: str) -> list:
