@@ -89,3 +89,39 @@ def test_unknown_board_is_404(served):
     with pytest.raises(urllib.error.HTTPError) as e:
         get(base + "/api/boards/b_nope")
     assert e.value.code == 404
+
+
+def post(url, headers=None):
+    req = urllib.request.Request(url, data=b"", method="POST", headers=headers or {})
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read())
+
+
+def test_end_session_frees_files_and_tells_the_board(served):
+    store, base = served
+    board, key = store.create_board("b", "p", "claude-code-1a2b")
+    store.touch(board.id, "codex-3f2a")
+    store.set_nickname(board.id, "codex-3f2a", "acorn")
+    store.claim(board.id, "codex-3f2a", ["src/api.py"], lock=True)
+    store.set_waiting(board.id, "codex-3f2a", "Should I rerun?")
+    pr = store.post(key, "codex-3f2a", "post when seeds rebuilt", "promise")
+
+    url = f"{base}/api/boards/{board.id}/agents/codex-3f2a/end"
+    with pytest.raises(urllib.error.HTTPError) as e:          # no header: refused
+        post(url)
+    assert e.value.code == 403
+    with pytest.raises(urllib.error.HTTPError) as e:          # another site: refused
+        post(url, {"X-Huddlehut": "1", "Origin": "https://evil.example"})
+    assert e.value.code == 403
+
+    assert post(url, {"X-Huddlehut": "1"}) == {"ok": True}
+    p = store.presence(board.id)["codex-3f2a"]
+    assert p["state"] == "left" and p["waiting"] is None
+    assert store.claims(board.id) == []
+    last = store.all_messages(board.id)[-1]
+    assert last.kind == "blocker" and last.author == "user"
+    assert "acorn's session was ended by the user" in last.content and f"#{pr.id}" in last.content
+
+    with pytest.raises(urllib.error.HTTPError) as e:
+        post(f"{base}/api/boards/{board.id}/agents/nobody-0000/end", {"X-Huddlehut": "1"})
+    assert e.value.code == 404

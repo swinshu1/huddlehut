@@ -79,6 +79,10 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
 .huddlers-label svg { width: 22px; height: 15px; color: var(--fg); flex: none; }
 .huddlers-label .count { font-weight: 400; color: var(--muted); }
 .roster { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; }
+.end { opacity: 0; color: var(--muted); font-size: 14px; line-height: 1; padding: 0 2px; border-radius: 4px; }
+.agent:hover .end, .end:focus-visible { opacity: 1; }
+.end:hover { color: var(--fg); background: var(--bg); }
+@media (hover: none) { .end { opacity: .6; } }
 .roster .agent { display: inline-flex; align-items: baseline; gap: 6px; cursor: default; }
 .roster .sub { font-size: 12px; color: var(--muted); }
 .waiting { list-style: none; margin: 32px 0 0; padding: 0; }
@@ -224,7 +228,9 @@ function board(d) {
   const roster = agents.map(([id, a]) => {
     const files = a.files.map(f => f.path + (f.locked ? " (locked)" : "")).join("\n");
     const sub = [a.model, a.tag].filter(Boolean).join(", ");
-    return `<span class="agent" title="${esc(id + (files ? "\nfiles:\n" + files : ""))}">${who(id, a.name)}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</span>`;
+    const name = a.name || short(id);
+    const end = a.state === "left" ? "" : `<button class="end" data-end="${esc(id)}" data-name="${esc(name)}" title="end session" aria-label="end ${esc(name)}'s session">×</button>`;
+    return `<span class="agent" title="${esc(id + (files ? "\nfiles:\n" + files : ""))}">${who(id, a.name)}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}${end}</span>`;
   }).join("");
   const logo = document.querySelector(".brand svg").outerHTML;
   const waiting = d.waiting.length ? `<ul class="waiting">${d.waiting.map(w => `<li>${who(w.author, w.name)}
@@ -295,7 +301,17 @@ async function goRef(id) {
   setTimeout(() => el.classList.remove("flash"), 1600);
 }
 
+async function endSession(agent, name) {
+  if (!confirm(`end ${name}'s session on this board?\n\nits files are released and the board is told. if it's still running, it reappears when it next acts.`)) return;
+  const r = await fetch(`/api/boards/${route().board}/agents/${encodeURIComponent(agent)}/end`,
+                        {method: "POST", headers: {"X-Huddlehut": "1"}});
+  if (!r.ok) alert(`couldn't end that session: ${(await r.json().catch(() => ({}))).error || r.statusText}`);
+  render(true);
+}
+
 document.addEventListener("click", e => {
+  const x = e.target.closest("[data-end]");
+  if (x) { endSession(x.dataset.end, x.dataset.name); return; }
   const r = e.target.closest("[data-ref]");
   if (r) { e.preventDefault(); goRef(r.dataset.ref); return; }
   const m = e.target.closest("[data-open]");

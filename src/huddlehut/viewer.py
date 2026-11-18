@@ -89,6 +89,13 @@ class Viewer:
                 "lessons": len(s.list_memories(board_id=b.id)),
             }
 
+    def end_session(self, board_id: str, agent: str) -> dict:
+        with self.lock:
+            if agent not in self.store.presence(board_id) and agent not in self.store.labels(board_id):
+                raise BoardError(f"no agent {agent} on this board")
+            self.store.end_session(board_id, agent)
+        return {"ok": True}
+
     def memory(self, q: str = "", project: str = "") -> dict:
         with self.lock:
             lessons = (self.store.search_memories(q, project or None, limit=100) if q.strip()
@@ -117,6 +124,23 @@ def make_handler(viewer: Viewer):
 
         def _json(self, data, code: int = 200) -> None:
             self._send(code, json.dumps(data).encode(), "application/json")
+
+        def do_POST(self) -> None:
+            # The page sends a custom header, which other websites can't send to localhost without a CORS
+            # preflight we never allow, so a random page can't end your sessions.
+            origin = self.headers.get("Origin")
+            host = self.headers.get("Host", "")
+            if self.headers.get("X-Huddlehut") != "1" or (origin and origin.split("://", 1)[-1] != host):
+                self._json({"error": "forbidden"}, 403)
+                return
+            parts = urlparse(self.path).path.strip("/").split("/")
+            try:
+                if len(parts) == 6 and parts[:2] == ["api", "boards"] and parts[3] == "agents" and parts[5] == "end":
+                    self._json(viewer.end_session(parts[2], parts[4]))
+                else:
+                    self._json({"error": "not found"}, 404)
+            except BoardError as e:
+                self._json({"error": str(e)}, 404)
 
         def do_GET(self) -> None:
             url = urlparse(self.path)
