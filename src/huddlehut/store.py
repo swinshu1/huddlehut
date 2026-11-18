@@ -118,6 +118,12 @@ def short_model(model: str | None) -> str:
     return re.sub(r"-(\d+)$", r" \1", m) if m != model.lower() else model
 
 
+def tool_of(agent: str) -> str:
+    """The client an agent id came from: "claude-code-3f2a" -> "claude-code"."""
+    base, _, tag = agent.rpartition("-")
+    return base if base and re.fullmatch(r"[0-9a-f]{4}", tag) else agent
+
+
 def default_nickname(agent: str, taken=()) -> str:
     """A cute name picked from the agent id, skipping names already used on the board."""
     start = int(hashlib.sha1(agent.encode()).hexdigest(), 16) % len(CUTE_NAMES)
@@ -176,6 +182,9 @@ CREATE TABLE IF NOT EXISTS claims (
     board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
     since REAL NOT NULL, locked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (board_id, toplevel, path)
 );
+CREATE TABLE IF NOT EXISTS identities (
+    client TEXT PRIMARY KEY, agent TEXT NOT NULL, created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS milestones (
     id INTEGER PRIMARY KEY AUTOINCREMENT, board_id TEXT NOT NULL REFERENCES boards(id), text TEXT NOT NULL,
     position REAL NOT NULL, created_by TEXT NOT NULL, created_at REAL NOT NULL, done_by TEXT, done_at REAL
@@ -227,6 +236,8 @@ POSTGRES_SCHEMA = [
         board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
         since DOUBLE PRECISION NOT NULL, locked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (board_id, toplevel, path))""",
     "ALTER TABLE claims ADD COLUMN IF NOT EXISTS locked INTEGER NOT NULL DEFAULT 0",
+    """CREATE TABLE IF NOT EXISTS identities (
+        client TEXT PRIMARY KEY, agent TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS milestones (
         id BIGSERIAL PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), text TEXT NOT NULL,
         position DOUBLE PRECISION NOT NULL, created_by TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL,
@@ -783,6 +794,30 @@ class Store:
         cutoff = time.time() - IDLE_AFTER
         return {a: p for a, p in self.presence(board_id).items()
                 if p["state"] == "active" and p["seen_at"] >= cutoff and a != exclude}
+
+    # ---- identity -----------------------------------------------------------
+    # A client session (e.g. one Claude Code conversation) keeps one agent id for good, so a restarted or
+    # resumed session is the same agent: same nickname, read position, files and promises.
+
+    def identity(self, client: str, fresh: str) -> str:
+        """The agent id this client session had before, or `fresh` (remembered from now on)."""
+        self.db.execute("INSERT INTO identities (client, agent, created_at) VALUES (?, ?, ?)"
+                        " ON CONFLICT (client) DO NOTHING", (client, fresh, time.time()))
+        return self._one("SELECT agent FROM identities WHERE client=?", (client,))["agent"]
+
+    def remember_identity(self, client: str, agent: str) -> None:
+        self.db.execute("INSERT INTO identities (client, agent, created_at) VALUES (?, ?, ?)"
+                        " ON CONFLICT (client) DO UPDATE SET agent = excluded.agent", (client, agent, time.time()))
+
+    def dormant_holder(self, board_id: str, nickname: str, tool: str) -> str | None:
+        """The agent of the same tool that held this nickname here and has since gone idle or left: most
+        likely the same agent coming back after a restart. An active holder is someone else."""
+        cutoff = time.time() - IDLE_AFTER
+        for agent, p in self.presence(board_id).items():
+            if (p.get("nickname") == nickname.strip().lower() and tool_of(agent) == tool
+                    and (p["state"] == "left" or p["seen_at"] < cutoff)):
+                return agent
+        return None
 
     # ---- nicknames ----------------------------------------------------------
     # Agents pick a cute one-word name when they join. The id (claude-code-3f2a) stays the key
