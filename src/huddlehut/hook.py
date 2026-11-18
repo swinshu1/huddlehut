@@ -67,9 +67,13 @@ def load(session_id: str) -> dict:
 
 def save(session_id: str, state: dict) -> None:
     SESSIONS.mkdir(parents=True, exist_ok=True)
-    tmp = _state_path(session_id).with_suffix(".tmp")
-    tmp.write_text(json.dumps(state))
-    tmp.replace(_state_path(session_id))
+    path = _state_path(session_id)
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(state))
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def unlink(session_id: str) -> None:
