@@ -147,6 +147,7 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
 .composer + .err { margin-left: 14px !important; }
 .roster .sub { font-size: 12px; color: var(--muted); }
 .roster .reach { font-size: 12px; color: var(--attn); margin-left: 4px; cursor: help; }
+.roster .reach.old { color: var(--muted); }
 .waiting { list-style: none; margin: 32px 0 0; padding: 0; }
 .waiting li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; gap: 14px; padding: 12px 14px;
   margin-bottom: 8px; border-radius: 12px; background: color-mix(in srgb, var(--attn) 10%, transparent); }
@@ -350,11 +351,13 @@ function board(d) {
         ? `<span class="reach" title="${esc(`${r.waiting} message(s) have waited for it since ${clock(r.since)} and it hasn't acted since: its session may be stuck, errored or closed. End its session if it's gone.`)}">not responding · ${r.waiting} waiting</span>`
       : r.status === "unlinked"
         ? `<span class="reach" title="its hooks never linked, so pings can't wake it; it sees messages only when it next uses a board tool. Ask it to join_board again.">can't be woken</span>` : "";
+    const old = r.current === false
+        ? `<span class="reach old" title="its board server started before the current Huddle Hut features (like the goal tool for checking off milestones), and a server keeps the code it started with. Restart that session to update it; for Codex, quit and reopen the app.">old board code</span>` : "";
     const name = a.name || short(id);
     const live = a.state !== "left" && b.status === "open";
     const pill = live ? `<button class="ping" style="--hue:${hue(id)}" data-ping="${esc(name)}" title="ping ${esc(name)} to look at the board" aria-label="ping ${esc(name)}">${who(id, a.name)}</button>` : who(id, a.name);
     const end = live ? `<button class="end" data-end="${esc(id)}" data-name="${esc(name)}" title="end session" aria-label="end ${esc(name)}'s session">×</button>` : "";
-    return `<span class="agent" title="${esc(id + (files ? "\nfiles:\n" + files : ""))}">${pill}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}${warn}${end}</span>`;
+    return `<span class="agent" title="${esc(id + (files ? "\nfiles:\n" + files : ""))}">${pill}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}${warn}${old}${end}</span>`;
   }).join("");
   const logo = document.querySelector(".brand svg").outerHTML;
   const waiting = d.waiting.length ? `<ul class="waiting">${d.waiting.map(w => `<li>${who(w.author, w.name)}

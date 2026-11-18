@@ -70,6 +70,11 @@ KIND_ALIASES = {"update": "note", "thinking": "note", "plan": "status", "progres
                 "commitment": "promise", "owe": "promise"}
 IDLE_AFTER = 900  # seconds without activity before an agent shows as idle
 TICKET_TTL = 3600  # how long a wake ticket stays good
+# The board server's feature level. A server process keeps the code it started with, often for days (the
+# Codex app never restarts it), so a change that running sessions only get by restarting raises this:
+# servers record their level as they act, and the viewer flags agents on an older one.
+# 1: goal tool, entering a board on any tool use, wake tickets, reach notes, milestone reminders.
+SERVER_LEVEL = 1
 SESSION_TIMEOUT = float(os.environ.get("HUDDLEHUT_SESSION_TIMEOUT_DAYS", "3")) * 86400  # then it's ended
 
 CUTE_NAMES = ("mochi", "pebble", "sprout", "biscuit", "dumpling", "noodle", "pickle", "waffle", "acorn", "button",
@@ -181,7 +186,7 @@ CREATE TABLE IF NOT EXISTS cursors (
 CREATE TABLE IF NOT EXISTS presence (
     board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at REAL NOT NULL,
     state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT, nickname TEXT, model TEXT,
-    waiting TEXT, waiting_at REAL,
+    waiting TEXT, waiting_at REAL, level INTEGER,
     PRIMARY KEY (board_id, agent)
 );
 CREATE TABLE IF NOT EXISTS claims (
@@ -236,9 +241,10 @@ POSTGRES_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS presence (
         board_id TEXT NOT NULL, agent TEXT NOT NULL, seen_at DOUBLE PRECISION NOT NULL,
         state TEXT NOT NULL DEFAULT 'active', cwd TEXT, toplevel TEXT, branch TEXT, nickname TEXT, model TEXT,
-        waiting TEXT, waiting_at DOUBLE PRECISION,
+        waiting TEXT, waiting_at DOUBLE PRECISION, level INTEGER,
         PRIMARY KEY (board_id, agent))""",
     "ALTER TABLE presence ADD COLUMN IF NOT EXISTS waiting TEXT",
+    "ALTER TABLE presence ADD COLUMN IF NOT EXISTS level INTEGER",
     "ALTER TABLE presence ADD COLUMN IF NOT EXISTS waiting_at DOUBLE PRECISION",
     "ALTER TABLE presence ADD COLUMN IF NOT EXISTS nickname TEXT",
     "ALTER TABLE presence ADD COLUMN IF NOT EXISTS model TEXT",
@@ -310,6 +316,7 @@ class _Sqlite:
             ("presence", "model", "model TEXT"),
             ("presence", "waiting", "waiting TEXT"),
             ("presence", "waiting_at", "waiting_at REAL"),
+            ("presence", "level", "level INTEGER"),
         ):
             have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in have:
@@ -746,17 +753,18 @@ class Store:
     # ---- presence (who is around, and where they work) --------------------
 
     def touch(self, board_id: str, agent: str, cwd: str | None = None, toplevel: str | None = None,
-              branch: str | None = None) -> None:
+              branch: str | None = None, level: int | None = None) -> None:
         """Record activity. The MCP server doesn't know the agent's working folder, so missing
-        fields keep their last known value (hooks fill them in)."""
+        fields keep their last known value (hooks fill them in); the server records its SERVER_LEVEL."""
         self.db.execute(
-            "INSERT INTO presence (board_id, agent, seen_at, state, cwd, toplevel, branch)"
-            " VALUES (?, ?, ?, 'active', ?, ?, ?) ON CONFLICT (board_id, agent) DO UPDATE SET"
+            "INSERT INTO presence (board_id, agent, seen_at, state, cwd, toplevel, branch, level)"
+            " VALUES (?, ?, ?, 'active', ?, ?, ?, ?) ON CONFLICT (board_id, agent) DO UPDATE SET"
             " seen_at = excluded.seen_at, state = 'active',"
             " cwd = COALESCE(excluded.cwd, presence.cwd),"
             " toplevel = COALESCE(excluded.toplevel, presence.toplevel),"
-            " branch = COALESCE(excluded.branch, presence.branch)",
-            (board_id, agent, time.time(), cwd, toplevel, branch),
+            " branch = COALESCE(excluded.branch, presence.branch),"
+            " level = COALESCE(excluded.level, presence.level)",
+            (board_id, agent, time.time(), cwd, toplevel, branch, level),
         )
 
     def mark_left(self, board_id: str, agent: str) -> None:

@@ -27,7 +27,7 @@ from .compact import render_entries, render_files, render_progress, render_view
 from .mentions import addressable, mention_names, mentions, tags
 from .reach import unreachable_note
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
-from .store import USER, BoardError, Store, _snip, tool_of
+from .store import SERVER_LEVEL, USER, BoardError, Store, _snip, tool_of
 
 INSTRUCTIONS = """Boards: agents in separate sessions (Claude Code, Codex) share one project.
 Task start: search_memories. Have key: join_board. Else create_board, give user key.
@@ -130,7 +130,7 @@ class Session:
             raise BoardError("no board. join_board(key, nickname) or create_board first; rejoining keeps your name")
         self.key = key
         try:
-            store.touch(store.board_for_key(key).id, AUTHOR)  # presence: this agent is active
+            store.touch(store.board_for_key(key).id, AUTHOR, level=SERVER_LEVEL)  # active, on this code
         except BoardError:
             pass
         return key
@@ -198,7 +198,7 @@ def _identity(board_id: str, nickname: str, model: str, ticket: str = "") -> str
     if model:
         store.set_model(board_id, AUTHOR, model)
     if current:
-        store.touch(board_id, AUTHOR)
+        store.touch(board_id, AUTHOR, level=SERVER_LEVEL)
         if not note and nickname.strip() and nickname.strip().lower() != current:
             note = " (your name from before; keep it)"
         return f"You're {current} here{note}."
