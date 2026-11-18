@@ -46,3 +46,19 @@ def sweep_stale_distills(store: Store) -> list[str]:
     for board_id in ids:
         distill_in_background(store.url, board_id)
     return ids
+
+
+_last_sweep = 0.0
+
+
+def sweep_stale_sessions(store: Store, every: float = 60) -> list:
+    """End sessions idle past the timeout; cheap, and at most once a minute per process."""
+    global _last_sweep
+    if time.time() - _last_sweep < every:
+        return []
+    _last_sweep = time.time()
+    try:
+        return store.end_stale_sessions()
+    except Exception as e:  # never let housekeeping break a tool call or a page load
+        print(f"[huddlehut] stale-session sweep failed: {e}", file=sys.stderr)
+        return []

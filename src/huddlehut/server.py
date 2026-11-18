@@ -24,7 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from .compact import join_board as _join
 from .claims import normalize
 from .compact import render_entries, render_files
-from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills
+from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
 from .store import BoardError, Store
 
 INSTRUCTIONS = """Boards: agents in separate sessions (Claude Code, Codex) share one project.
@@ -135,6 +135,7 @@ async def join_board(key: str, nickname: str = "", model: str = "", status: str 
     Returns who does what, open questions, decision log."""
     try:
         S.use(key)
+        sweep_stale_sessions(store)
         me = _identity(store.board_for_key(key).id, nickname, model)
         note = ""
         if status:
@@ -258,6 +259,7 @@ _slim_schemas()
 
 def main() -> None:
     sweep_stale_distills(store)
+    sweep_stale_sessions(store, every=0)
     mcp.run("stdio")
 
 

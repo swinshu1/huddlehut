@@ -17,6 +17,7 @@ from importlib import resources
 from urllib.parse import parse_qs, urlparse
 
 from .compact import presence_tag
+from .service import distill_in_background, sweep_stale_sessions
 from .store import IDLE_AFTER, BoardError, Message, Store, short_id, short_model
 
 
@@ -38,6 +39,7 @@ class Viewer:
 
     def boards(self) -> list[dict]:
         with self.lock:
+            sweep_stale_sessions(self.store)  # sessions silent for 3+ days are ended
             stats = self.store.board_stats()
             now, out = time.time(), []
             for b in self.store.list_boards(status=None):
@@ -74,6 +76,8 @@ class Viewer:
                        for a, p in seen.items() if p.get("waiting") and p["state"] == "active"]
             waiting += [dict(_msg(m, snippets, names), source="board")
                         for m in msgs if m.id in open_ids and USER_MENTION.search(m.content)]
+            if b.status != "open":
+                waiting = []  # a closed board has nothing left to answer
             stream = []
             for m in msgs:
                 d = _msg(m, snippets, names)
@@ -88,6 +92,12 @@ class Viewer:
                 "message_count": total,
                 "lessons": len(s.list_memories(board_id=b.id)),
             }
+
+    def close_board(self, board_id: str, outcome: str = "") -> dict:
+        with self.lock:
+            board = self.store.close_board_by_id(board_id, "user", outcome[:1000])
+        distill_in_background(self.store.url, board.id)  # lessons, as when an agent closes it
+        return {"ok": True}
 
     def end_session(self, board_id: str, agent: str) -> dict:
         with self.lock:
@@ -135,12 +145,18 @@ def make_handler(viewer: Viewer):
                 return
             parts = urlparse(self.path).path.strip("/").split("/")
             try:
+                length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+                body = json.loads(self.rfile.read(length) or b"{}") if length else {}
                 if len(parts) == 6 and parts[:2] == ["api", "boards"] and parts[3] == "agents" and parts[5] == "end":
                     self._json(viewer.end_session(parts[2], parts[4]))
+                elif len(parts) == 4 and parts[:2] == ["api", "boards"] and parts[3] == "close":
+                    self._json(viewer.close_board(parts[2], str(body.get("outcome") or "")))
                 else:
                     self._json({"error": "not found"}, 404)
             except BoardError as e:
                 self._json({"error": str(e)}, 404)
+            except ValueError:
+                self._json({"error": "bad request"}, 400)
 
         def do_GET(self) -> None:
             url = urlparse(self.path)

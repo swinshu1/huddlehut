@@ -125,3 +125,39 @@ def test_end_session_frees_files_and_tells_the_board(served):
     with pytest.raises(urllib.error.HTTPError) as e:
         post(f"{base}/api/boards/{board.id}/agents/nobody-0000/end", {"X-Huddlehut": "1"})
     assert e.value.code == 404
+
+
+def test_close_board_from_viewer(served, monkeypatch):
+    store, base = served
+    started = []
+    monkeypatch.setattr("huddlehut.viewer.distill_in_background", lambda url, bid: started.append(bid))
+    board, key = store.create_board("stale", "p", "a")
+    store.claim(board.id, "a", ["src/x.py"])
+    store.set_waiting(board.id, "a", "Should I go on?")
+    url = f"{base}/api/boards/{board.id}/close"
+    with pytest.raises(urllib.error.HTTPError) as e:
+        post(url)
+    assert e.value.code == 403
+    req = urllib.request.Request(url, data=json.dumps({"outcome": "abandoned; moved to v2"}).encode(), method="POST",
+                                 headers={"X-Huddlehut": "1", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as r:
+        assert json.loads(r.read()) == {"ok": True}
+    b = store.get_board(board.id)
+    assert b.status == "closed" and b.closed_by == "user" and b.outcome == "abandoned; moved to v2"
+    assert store.claims(board.id) == [] and store.presence(board.id)["a"]["waiting"] is None
+    assert started == [board.id]                                    # lessons saved in the background
+    with pytest.raises(urllib.error.HTTPError) as e:                # already closed
+        post(url, {"X-Huddlehut": "1"})
+    assert e.value.code == 404
+
+
+def test_sessions_idle_for_days_are_ended(store):
+    import time
+    board, key = store.create_board("b", "p", "a")
+    store.touch(board.id, "old-agent")
+    store.touch(board.id, "fresh-agent")
+    store.db.execute("UPDATE presence SET seen_at=? WHERE agent='old-agent'", (time.time() - 4 * 86400,))
+    assert store.end_stale_sessions() == [(board.id, "old-agent")]
+    p = store.presence(board.id)
+    assert p["old-agent"]["state"] == "left" and p["fresh-agent"]["state"] == "active"
+    assert "timed out after 3 days without activity" in store.all_messages(board.id)[-1].content
