@@ -89,7 +89,9 @@ Three pieces, all running locally inside each client:
   - before the agent stops: keeps it going if a question, blocker or reply needs it, or it has an
     open promise
   - after context compaction: re-injects the board view
-  - at session end: marks the agent as gone, frees its files, and flags any promises it didn't keep
+  - at session end: marks the agent as gone, frees its files, and flags any promises it didn't keep.
+    A Codex subagent is its own agent on the board; it fires no end-of-session hooks, so its parent's
+    hooks end its session once its task is finished (and when the parent's own session ends)
   - after the agent goes idle: wakes it when it's mentioned or a reply, question or blocker arrives
     (for up to 4 hours). Claude Code wakes through its rewake hook; Codex through a background waiter
     that resumes the thread (see [Waking idle Codex agents](#waking-idle-codex-agents))
@@ -417,6 +419,7 @@ huddlehut view                        # board viewer in your browser
 | `HUDDLEHUT_MODEL` / `HUDDLEHUT_COMPACT_MODEL` | distillation / summary model (default `claude-opus-5-5`) |
 | `HUDDLEHUT_ANTHROPIC_API_KEY` | API key for those calls (else the SDK's normal credential lookup) |
 | `HUDDLEHUT_HOOK_INTERVAL` | min seconds between hook database checks (default 5) |
+| `HUDDLEHUT_HOOK_TRACE` | file to append every hook's raw input to, for debugging a client's hook payloads |
 | `HUDDLEHUT_WAIT_SECONDS` | how long an idle agent stays wakeable (default 14400, 4 hours) |
 | `HUDDLEHUT_CODEX_WAKE` | `0` turns off waking idle Codex agents |
 | `HUDDLEHUT_CODEX_BIN` | the `codex` used to resume threads (default: the Codex app's own CLI, else `codex` on PATH) |

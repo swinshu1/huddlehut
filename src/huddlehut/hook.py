@@ -19,6 +19,12 @@ One entry point for Claude Code and Codex (`--client` picks the output format):
   wait           Claude Code only, as an asyncRewake Stop hook: after the agent goes idle, waits up
                  to HUDDLEHUT_WAIT_SECONDS for something that needs it, then wakes it (exit 2).
 
+Each link (a small file in ~/.huddlehut/sessions) belongs to one conversation: a Claude Code session, a
+Codex thread, or a Codex subagent. Codex reports a subagent's events under its parent's session_id plus
+the subagent's own agent_id; the subagent has its own board server and identity, so it gets its own
+link, and since it fires no Stop or SessionEnd hooks, its parent's hooks end its board session once its
+task finishes. Claude Code subagents share the parent's board server, so they share its link.
+
 The read cursor is the same one the session's MCP server uses (cursors table, keyed by the agent
 name), so nothing is delivered twice. Sessions that never joined a board exit before touching the
 database or running git, and nothing heavy is imported, so the hook adds little to each tool call.
@@ -38,6 +44,7 @@ from pathlib import Path
 HOME = Path(os.environ.get("HUDDLEHUT_HOME", Path.home() / ".huddlehut"))
 SESSIONS = HOME / "sessions"
 MARKER = re.compile(r"\[(b_[0-9a-f]{8}) you=([\w.-]+)\]")
+SUBAGENT_DONE_TOOLS = re.compile(r"^collaboration.*(wait|close)")  # Codex: a parent waited on or closed a subagent
 KEY = re.compile(r"\bbrd_[\w-]{16,}")
 BOARD_TOOL = re.compile(r"^mcp__.*huddlehut.*__")
 RISKY_GIT = re.compile(r"\bgit\b.*\b(commit|stash|reset|checkout|restore|clean)\b")
@@ -80,6 +87,14 @@ def save(session_id: str, state: dict) -> None:
 
 def unlink(session_id: str) -> None:
     _state_path(session_id).unlink(missing_ok=True)
+
+
+def _thread(inp: dict, client: str) -> tuple[str, str | None]:
+    """The conversation a hook event belongs to: (its link key, its parent session or None)."""
+    sid = inp.get("session_id") or ""
+    if client == "codex" and inp.get("agent_id"):
+        return str(inp["agent_id"]), sid  # a subagent: its own thread and board identity
+    return sid, None
 
 
 # ---- git --------------------------------------------------------------------
@@ -296,14 +311,80 @@ def _snip(text: str, n: int = 60) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+# ---- leaving: one path, and subagents that never say goodbye ------------------
+
+
+def _leave(key: str, state: dict, reason: str) -> None:
+    """This conversation's board session is over. Departure itself lives in the store (end_session),
+    shared with the viewer's end button and the stale-session sweep."""
+    try:
+        _store().end_session(state["board"], state["me"], by=state["me"], reason=reason, announce=False)
+    finally:
+        unlink(key)
+
+
+def thread_running(transcript: str | None) -> bool | None:
+    """Whether a Codex thread is mid-task, from its transcript (the rollout JSONL whose path Codex gives
+    hooks): True after a task_started, False after task_complete or turn_aborted, None if unknown."""
+    if not transcript:
+        return None
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        if '"task_' not in line and '"turn_aborted"' not in line:
+            continue
+        try:
+            kind = (json.loads(line).get("payload") or {}).get("type")
+        except (ValueError, AttributeError):
+            continue
+        if kind == "task_started":
+            return True
+        if kind in ("task_complete", "turn_aborted"):
+            return False
+    return None
+
+
+def subagents_of(parent: str) -> list[tuple[str, dict]]:
+    """Links of the subagents this session spawned: (link key, state)."""
+    if not parent or not SESSIONS.is_dir():
+        return []
+    found = []
+    for path in SESSIONS.glob("*.json"):
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if state.get("parent") == parent:
+            found.append((path.stem, state))
+    return found
+
+
+def end_subagents(parent: str, everyone: bool = False) -> list[str]:
+    """End the board sessions of this session's subagents whose task finished, or of all of them when
+    the parent's own session ends. Returns the agents ended."""
+    ended = []
+    for key, state in subagents_of(parent):
+        if everyone or thread_running(state.get("transcript")) is False:
+            _leave(key, state, "ended (subagent finished)")
+            ended.append(state["me"])
+    return ended
+
+
 # ---- events -----------------------------------------------------------------
 
 
 def post_tool(inp: dict, client: str) -> dict | None:
-    sid = inp.get("session_id") or ""
+    sid, parent = _thread(inp, client)
     tool = inp.get("tool_name") or ""
     cwd = inp.get("cwd")
     now = time.time()
+    if client == "codex" and not parent and SUBAGENT_DONE_TOOLS.match(tool):
+        end_subagents(sid)  # it waited on or closed its subagents: end the ones that finished
     if BOARD_TOOL.match(tool):
         response = json.dumps(inp.get("tool_response"), ensure_ascii=False)
         m = MARKER.search(response)
@@ -319,6 +400,10 @@ def post_tool(inp: dict, client: str) -> dict | None:
             key = KEY.search(str((inp.get("tool_input") or {}).get("key", ""))) or KEY.search(response)
             if key:
                 state["key"] = key.group(0)
+            if parent:
+                state["parent"] = parent  # its parent's hooks end it
+            if inp.get("transcript_path"):
+                state["transcript"] = inp["transcript_path"]
         if state:
             state["active"] = now
             save(sid, state)
@@ -405,13 +490,13 @@ def pre_tool(inp: dict, client: str) -> dict | None:
     tool = inp.get("tool_name") or ""
     tool_input = inp.get("tool_input") or {}
     if tool in EDIT_TOOLS or tool == "apply_patch":
-        return _guard_edit(inp, tool, tool_input)
+        return _guard_edit(inp, tool, tool_input, client)
     if tool != "Bash":
         return None
     command = str(tool_input.get("command", ""))
     if not RISKY_GIT.search(command):
         return None
-    sid = inp.get("session_id") or ""
+    sid, _ = _thread(inp, client)
     state = load(sid)
     if not state:
         return None
@@ -450,8 +535,8 @@ def pre_tool(inp: dict, client: str) -> dict | None:
     )
 
 
-def _guard_edit(inp: dict, tool: str, tool_input: dict) -> dict | None:
-    sid = inp.get("session_id") or ""
+def _guard_edit(inp: dict, tool: str, tool_input: dict, client: str) -> dict | None:
+    sid, _ = _thread(inp, client)
     state = load(sid)
     if not state:
         return None
@@ -507,6 +592,8 @@ def session_start(inp: dict, client: str) -> dict | None:
 
 
 def stop(inp: dict, client: str) -> dict | None:
+    if client == "codex":
+        end_subagents(inp.get("session_id") or "")
     out = _stop(inp, client)
     if out is None and client == "codex":
         from . import codex_wake
@@ -555,19 +642,11 @@ def _stop(inp: dict, client: str) -> dict | None:
 
 def session_end(inp: dict, client: str) -> dict | None:
     sid = inp.get("session_id") or ""
+    end_subagents(sid, everyone=True)  # they don't outlive the session that spawned them
     state = load(sid)
     if not state or state.get("waking_until", 0) > time.time():
         return None  # not on a board, or a headless wake turn ended: the agent's own thread lives on
-    store = _store()
-    store.mark_left(state["board"], state["me"])
-    store.set_waiting(state["board"], state["me"], None)
-    store.release(state["board"], state["me"], ["*"])  # gone: its files are free
-    board = store.get_board(state["board"])
-    promises = _open_promises(store, board.id, state["me"]) if board.status == "open" else []
-    if promises:
-        ids = ", ".join(f"#{m.id} ({_snip(m.content, 50)})" for m in promises[:3])
-        store.post_to(board, state["me"], f"Session ended. Unkept promise: {ids}. Pick it up or re-plan.", "blocker")
-    unlink(sid)
+    _leave(sid, state, "ended")
     return None
 
 
@@ -623,6 +702,12 @@ def main(argv: list[str] | None = None) -> int:
         inp = json.load(sys.stdin)
     except ValueError:
         return 0
+    if os.environ.get("HUDDLEHUT_HOOK_TRACE"):  # debugging: what each client sends its hooks
+        try:
+            with open(os.environ["HUDDLEHUT_HOOK_TRACE"], "a") as f:
+                f.write(json.dumps({"event": event, "client": client, "at": time.time(), "input": inp}) + "\n")
+        except OSError:
+            pass
     try:
         if event == "wait":
             return wait(inp, client)
