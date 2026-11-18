@@ -27,7 +27,7 @@ from .compact import render_entries, render_files, render_progress, render_view
 from .mentions import addressable, mention_names, mentions, tags
 from .reach import unreachable_note
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
-from .store import USER, BoardError, Store, tool_of
+from .store import USER, BoardError, Store, _snip, tool_of
 
 INSTRUCTIONS = """Boards: agents in separate sessions (Claude Code, Codex) share one project.
 Task start: search_memories. Have key: join_board. Else create_board, give user key.
@@ -152,6 +152,18 @@ class Session:
         return new, cursor, board.status
 
 
+def _milestone_note(m) -> str:
+    """After a result: the board's open milestones, so the agent checks off one it just finished. A result
+    is when milestones get done, and agents otherwise forget to say so."""
+    if m.kind != "result":
+        return ""
+    todo = [x for x in store.milestones(m.board_id) if not x["done_at"]]
+    if not todo:
+        return ""
+    shown = "; ".join(f"m{x['id']} {_snip(x['text'], 60)}" for x in todo[:4]) + (f" (+{len(todo) - 4} more)" if len(todo) > 4 else "")
+    return f"\nOpen milestones: {shown}. If this result finished one, goal(done=[id])."
+
+
 def _held_note(m) -> str:
     """A status claimed files someone else holds: say so instead of silently not claiming them."""
     held = getattr(m, "conflicts", None) or []
@@ -273,7 +285,7 @@ def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "") -> 
     except BoardError as e:
         return f"error: {e}"
     news = "\nNew:\n" + _flag_mentions(m.board_id, new, render_entries(store, new)) if new else ""
-    return (pre + f"ok #{m.id}" + _held_note(m) + _unknown_mentions(m.board_id, content)
+    return (pre + f"ok #{m.id}" + _held_note(m) + _milestone_note(m) + _unknown_mentions(m.board_id, content)
             + unreachable_note(store, m.board_id, content, AUTHOR) + news + S.nudge(m.board_id))
 
 

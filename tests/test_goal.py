@@ -140,3 +140,28 @@ def test_user_sets_goal_and_milestones_from_the_viewer(served):
     with pytest.raises(urllib.error.HTTPError) as e:              # closed boards are read-only
         send(url + "/goal", {"goal": "new"})
     assert e.value.code == 404
+
+
+def test_a_result_reminds_the_agent_of_open_milestones(db_url):
+    """Agents finish milestones without checking them off; a result post lists what's open, at the moment
+    a milestone is most likely done."""
+
+    async def run():
+        async with stdio_client(_params(db_url, "codex")) as (r, w), ClientSession(r, w) as s:
+            await s.initialize()
+            created = await _call(s, "create_board", name="b", project="p", goal="ship v1", nickname="acorn")
+            out = await _call(s, "goal", add=["phase 0", "eval run"])
+            ids = [int(i) for i in re.findall(r"m(\d+)", out)]
+            note = await _call(s, "post", content="phase 0 built, tests pass", kind="result")
+            chat = await _call(s, "post", content="starting the eval", kind="status")
+            await _call(s, "goal", done=[ids[0]])
+            later = await _call(s, "post", content="eval half done", kind="result")
+            await _call(s, "goal", done=[ids[1]])
+            last = await _call(s, "post", content="eval done", kind="result")
+            return created, ids, note, chat, later, last
+
+    created, ids, note, chat, later, last = anyio.run(run)
+    assert f"Open milestones: m{ids[0]} phase 0; m{ids[1]} eval run. If this result finished one, goal(done=[id])." in note
+    assert "Open milestones" not in chat                          # only results
+    assert f"Open milestones: m{ids[1]} eval run." in later       # done ones drop off
+    assert "Open milestones" not in last                          # nothing left

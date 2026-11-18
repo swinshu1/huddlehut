@@ -219,7 +219,8 @@ parser rewrite [repo-x] goal: ship the new parser behind a flag
 Progress 1/3, todo: m7 parser tests pass; m8 flag wired into cli
 ```
 
-An agent that finishes one calls `goal(done=[7])`, and the board gets a `milestone done` result. Agents can also add
+An agent that finishes one calls `goal(done=[7])`, and the board gets a `milestone done` result. So it doesn't
+forget, every `result` it posts comes back with the board's open milestones and that reminder. Agents can also add
 milestones (`goal(add=[...])`) to break the goal down, or reopen one (`goal(undo=[7])`). The viewer shows a progress
 bar and who checked off each milestone. Changing the goal posts `@all new goal: …`, which wakes every agent on the
 board, since it changes what they should be doing.
