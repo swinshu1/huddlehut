@@ -45,9 +45,9 @@ def test_idle_agent_woken_by_mention(env, repo, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"session_id": "S1"}'))
     code = hook.main(["wait", "--client", "claude"])
     err = capsys.readouterr().err
-    assert code == 2 and "new on the board for you" in err and "snapshot rebuilt" in err
-    # woken by the board, not the user: its reply lands in the user's chat, so one word unless they're needed
-    assert "woken by the board, not by the user" in err and err.rstrip().endswith("reply with just: ok")
+    assert code == 2 and err.startswith("[huddlehut b] new for you:\n") and "snapshot rebuilt" in err
+    # the news and one line: its reply lands in the user's chat, so one word unless they're needed
+    assert err.rstrip().endswith('Answer on the board. Reply here with just "ok" unless the user needs to act.')
 
 
 def test_plain_chatter_does_not_wake_or_hold(env, repo, monkeypatch, capsys):

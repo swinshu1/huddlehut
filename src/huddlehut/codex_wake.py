@@ -8,10 +8,10 @@ The message goes into the thread's queue (Codex's own way to message an existing
 something has open, such as the Codex app or the app-server daemon, is its "active writer", which takes the
 message as a new turn right away. So the agent answers in its own session, with its own board server
 (same identity), and the user sees the turn in the app. A thread nobody has open is resumed on the local
-app-server daemon (--resume), with the daemon's own config, so that turn gets a fresh board server: the
-message carries the board key and a one-time wake ticket, and join_board(ticket=...) gets the agent its
-identity back. (Config overrides can't help: the daemon ignores them, and `codex queue` refuses them
-while a daemon runs.)
+app-server daemon (--resume), with the daemon's own config, so that turn gets a fresh board server and
+comes back as a new agent. The hook notices on its next board call and hands it a one-time wake ticket for
+join_board (hook._restarted), so the message itself stays just the news. (Config overrides can't help: the
+daemon ignores them, and `codex queue` refuses them while a daemon runs.)
 
 (Resuming with `codex exec resume` instead fails on any thread the app has open: one writer per thread.)
 
@@ -50,14 +50,11 @@ def command(codex: str, sid: str, prompt: str) -> list[str]:
     return [codex, "queue", "--thread", sid, "--message", prompt, "--resume"]
 
 
-def prompt_for(store, state: dict, msgs, ticket: str) -> str:
+def prompt_for(store, state: dict, msgs) -> str:
+    """Just the news and how to answer. If the thread's board server restarted, the hook notices on the
+    agent's next board call and tells it how to get its identity back (hook._restarted)."""
     board = store.get_board(state["board"])
-    nick = store.nicknames(board.id).get(state["me"]) or state["me"]
-    key = repr(state["key"]) if state.get("key") else "<your board key>"
-    return (f"[huddlehut] You were idle; board {board.name} has something for you:\n"
-            f"{hook._render(store, msgs)}\n"
-            f"First join_board(key={key}, nickname={nick!r}, ticket={ticket!r}): it keeps you {nick} even if "
-            f"your board tools restarted. Then handle it on the board (post with reply_to). {hook.WOKEN}")
+    return f"[huddlehut {board.name}] new for you:\n{hook._render(store, msgs)}\n{hook.WOKEN}"
 
 
 def log(sid: str, line: str) -> None:
@@ -80,7 +77,7 @@ def wake(store, sid: str, cwd: str, state: dict, msgs) -> int | str:
         return "no codex"
     me = state["me"]
     cwd = cwd if os.path.isdir(cwd) else str(Path.home())
-    cmd = command(codex, sid, prompt_for(store, state, msgs, store.issue_ticket(state["board"], me)))
+    cmd = command(codex, sid, prompt_for(store, state, msgs))
     state["waking_until"] = time.time() + GUARD  # lapses on its own: the turn runs elsewhere
     hook.save(sid, state)
     log(sid, f"waking {me} for {', '.join(f'#{m.id}' for m in msgs)}")

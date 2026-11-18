@@ -147,9 +147,10 @@ def test_a_tick_queues_what_needs_the_agent_to_its_thread(env, monkeypatch, caps
     # queued to the thread: whatever has it open (the Codex app) takes it as a turn; else the daemon resumes it
     assert argv[:4] == ["queue", "--thread", "C1", "--message"] and argv[5:] == ["--resume"] and call["waking"]
     prompt = argv[4]
-    assert "@acorn are the seeds rebuilt?" in prompt and prompt.endswith("reply with just: ok")
-    ticket = re.search(rf"join_board\(key='{key}', nickname='acorn', ticket='(wk_[\w-]+)'\)", prompt).group(1)
-    assert store.redeem_ticket(ticket, board.id) == "codex-cccc"            # a resumed board server becomes acorn
+    # just the news and one line: a restarted board server is the hook's to notice (test_hooks)
+    assert prompt.startswith("[huddlehut parser] new for you:\n") and "@acorn are the seeds rebuilt?" in prompt
+    assert prompt.endswith('Answer on the board. Reply here with just "ok" unless the user needs to act.')
+    assert "join_board" not in prompt and len(prompt.splitlines()) == 4
     assert store.unread(board.id, "codex-cccc") == []                      # delivered once
     assert hook.load("C1")["waking_until"] > time.time()                   # and not woken again meanwhile
     log = (hook.HOME / "wake.log").read_text()
