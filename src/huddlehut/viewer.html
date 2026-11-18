@@ -79,6 +79,17 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
 .huddlers-label svg { width: 22px; height: 15px; color: var(--fg); flex: none; }
 .huddlers-label .count { font-weight: 400; color: var(--muted); }
 .roster { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; }
+.confirm { margin-top: 16px; padding: 14px 16px; border-radius: 14px; background: var(--hover); }
+.confirm p { margin: 0; max-width: 60ch; }
+.confirm input { width: 100%; max-width: 460px; font: inherit; color: var(--fg); background: var(--bg); border: 0;
+  box-shadow: 0 0 0 1px var(--line); border-radius: 8px; padding: 7px 10px; margin-top: 10px; }
+.confirm input:focus { outline: none; box-shadow: 0 0 0 1px var(--fg); }
+.confirm-actions { display: flex; gap: 8px; margin-top: 12px; }
+.btn { font-size: 13.5px; padding: 5px 14px; border-radius: 999px; box-shadow: 0 0 0 1px var(--line); background: var(--bg); }
+.btn:hover { box-shadow: 0 0 0 1px var(--muted); }
+.btn.primary { background: var(--fg); color: var(--bg); box-shadow: none; }
+.btn:disabled { opacity: .6; cursor: default; }
+.err { color: var(--attn); font-size: 13px; margin-top: 8px !important; }
 .closeb { float: right; margin-top: 6px; font-size: 13px; color: var(--muted); padding: 3px 10px; border-radius: 999px; box-shadow: 0 0 0 1px var(--line); }
 .closeb:hover { color: var(--fg); box-shadow: 0 0 0 1px var(--muted); }
 .end { opacity: 0; color: var(--muted); font-size: 14px; line-height: 1; padding: 0 2px; border-radius: 4px; }
@@ -191,6 +202,7 @@ async function get(url) {
 }
 
 let boards = [], last = "";
+let pending = null, outcomeDraft = "", actionError = "", working = false;  // inline confirm panel state
 const open = new Set();
 
 function long(text, key) {
@@ -231,7 +243,7 @@ function board(d) {
     const files = a.files.map(f => f.path + (f.locked ? " (locked)" : "")).join("\n");
     const sub = [a.model, a.tag].filter(Boolean).join(", ");
     const name = a.name || short(id);
-    const end = a.state === "left" ? "" : `<button class="end" data-end="${esc(id)}" data-name="${esc(name)}" title="end session" aria-label="end ${esc(name)}'s session">×</button>`;
+    const end = a.state === "left" || b.status !== "open" ? "" : `<button class="end" data-end="${esc(id)}" data-name="${esc(name)}" title="end session" aria-label="end ${esc(name)}'s session">×</button>`;
     return `<span class="agent" title="${esc(id + (files ? "\nfiles:\n" + files : ""))}">${who(id, a.name)}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}${end}</span>`;
   }).join("");
   const logo = document.querySelector(".brand svg").outerHTML;
@@ -242,11 +254,20 @@ function board(d) {
   const lessons = d.lessons ? `<p class="dim"><a href="#/memory">${d.lessons} lesson${d.lessons === 1 ? "" : "s"} saved from this board</a></p>` : "";
   const outcome = b.status !== "open" && b.outcome ? `<p class="goal dim">outcome: ${esc(b.outcome)}</p>` : "";
   const stream = d.stream.length ? logList(d.stream) : '<p class="dim">nothing posted yet.</p>';
-  const close = b.status === "open" ? `<button class="closeb" id="close-board">close board</button>` : "";
+  const close = b.status === "open" && !pending ? `<button class="closeb" id="close-board">close board</button>` : "";
+  const err = actionError ? `<p class="err">${esc(actionError)}</p>` : "";
+  const busy = working ? " disabled" : "";
+  const closePanel = pending && pending.type === "close" && b.status === "open" ? `<div class="confirm" role="group" aria-label="close board">
+      <p>close <strong>${esc(b.name)}</strong>? it becomes read-only, its files are released, and lessons are saved to memory.</p>
+      <input id="outcome" placeholder="what happened? (optional, helps the lessons)" value="${esc(outcomeDraft)}" autocomplete="off">
+      <div class="confirm-actions"><button class="btn primary" id="do-close"${busy}>close board</button><button class="btn" id="cancel">cancel</button></div>${err}</div>` : "";
+  const endPanel = pending && pending.type === "end" ? `<div class="confirm" role="group" aria-label="end session">
+      <p>end <strong>${esc(pending.name)}</strong>'s session? its files are released and the board is told. if it's still running, it reappears when it next acts.</p>
+      <div class="confirm-actions"><button class="btn primary" id="do-end"${busy}>end session</button><button class="btn" id="cancel">cancel</button></div>${err}</div>` : "";
   return `${close}<h1 class="title">${esc(b.name)}</h1>
     <div class="meta">${esc(b.project)}, ${b.status === "open" ? "open" : "closed"} since ${day(b.status === "open" ? b.created_at : b.closed_at || b.created_at)}</div>
-    ${b.goal ? `<p class="goal">${esc(b.goal)}</p>` : ""}${outcome}
-    ${roster ? `<div class="huddlers"><div class="huddlers-label">${logo}huddlers<span class="count">${here} here now</span></div><div class="roster">${roster}</div></div>` : ""}
+    ${b.goal ? `<p class="goal">${esc(b.goal)}</p>` : ""}${outcome}${closePanel}
+    ${roster ? `<div class="huddlers"><div class="huddlers-label">${logo}huddlers<span class="count">${here} here now</span></div><div class="roster">${roster}</div></div>` : ""}${endPanel}
     ${waiting}
     <div class="stream">${stream}${older}${lessons}</div>`;
 }
@@ -289,11 +310,11 @@ async function render(force = false) {
   }
   side(r);
   if (!force && html === last) return;
-  const typing = document.activeElement && document.activeElement.id === "q";
-  const caret = typing ? $("#q").selectionStart : 0;
+  const focused = document.activeElement && ["q", "outcome"].includes(document.activeElement.id) ? document.activeElement.id : null;
+  const caret = focused ? document.activeElement.selectionStart : 0;
   last = html;
   $("#main").innerHTML = html;
-  if (typing) { $("#q").focus(); $("#q").setSelectionRange(caret, caret); }
+  if (focused && document.getElementById(focused)) { const el = document.getElementById(focused); el.focus(); el.setSelectionRange(caret, caret); }
 }
 
 async function goRef(id) {
@@ -304,39 +325,52 @@ async function goRef(id) {
   setTimeout(() => el.classList.remove("flash"), 1600);
 }
 
-async function closeBoard() {
-  const name = document.querySelector(".title").textContent;
-  if (!confirm(`close ${name}?\n\nit becomes read-only, its files are released, and lessons are saved to memory.`)) return;
-  const outcome = prompt("what happened? (optional, helps the lessons)") ?? "";
-  const r = await fetch(`/api/boards/${route().board}/close`, {method: "POST",
-    headers: {"X-Huddlehut": "1", "Content-Type": "application/json"}, body: JSON.stringify({outcome})});
-  if (!r.ok) alert(`couldn't close it: ${(await r.json().catch(() => ({}))).error || r.statusText}`);
+async function act(url, body) {
+  working = true; actionError = ""; render(true);
+  try {
+    const r = await fetch(url, {method: "POST", headers: {"X-Huddlehut": "1", "Content-Type": "application/json"},
+                                body: JSON.stringify(body || {})});
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    pending = null; outcomeDraft = "";
+  } catch (e) {
+    actionError = `couldn't do that: ${e.message}`;
+  }
+  working = false;
   render(true);
 }
-
-async function endSession(agent, name) {
-  if (!confirm(`end ${name}'s session on this board?\n\nits files are released and the board is told. if it's still running, it reappears when it next acts.`)) return;
-  const r = await fetch(`/api/boards/${route().board}/agents/${encodeURIComponent(agent)}/end`,
-                        {method: "POST", headers: {"X-Huddlehut": "1"}});
-  if (!r.ok) alert(`couldn't end that session: ${(await r.json().catch(() => ({}))).error || r.statusText}`);
-  render(true);
+const closeBoard = () => act(`/api/boards/${route().board}/close`, {outcome: outcomeDraft});
+const endSession = () => act(`/api/boards/${route().board}/agents/${encodeURIComponent(pending.agent)}/end`);
+async function ask(next) {
+  pending = next; actionError = "";
+  await render(true);  // the panel exists only after the render's fetch finishes
+  const f = document.getElementById(next.type === "close" ? "outcome" : "do-end");
+  if (f) f.focus();
 }
 
 document.addEventListener("click", e => {
-  if (e.target.id === "close-board") { closeBoard(); return; }
+  if (e.target.id === "close-board") { ask({type: "close"}); return; }
+  if (e.target.id === "do-close") { closeBoard(); return; }
+  if (e.target.id === "do-end") { endSession(); return; }
+  if (e.target.id === "cancel") { pending = null; actionError = ""; render(true); return; }
   const x = e.target.closest("[data-end]");
-  if (x) { endSession(x.dataset.end, x.dataset.name); return; }
+  if (x) { ask({type: "end", agent: x.dataset.end, name: x.dataset.name}); return; }
   const r = e.target.closest("[data-ref]");
   if (r) { e.preventDefault(); goRef(r.dataset.ref); return; }
   const m = e.target.closest("[data-open]");
   if (m) { open.add(m.dataset.open); render(true); }
 });
+document.addEventListener("keydown", e => {
+  if (!pending) return;
+  if (e.key === "Escape") { pending = null; actionError = ""; render(true); }
+  if (e.key === "Enter" && e.target.id === "outcome") closeBoard();
+});
 document.addEventListener("input", e => {
+  if (e.target.id === "outcome") { outcomeDraft = e.target.value; return; }
   if (e.target.id !== "q") return;
   clearTimeout(window._t);
   window._t = setTimeout(() => { history.replaceState(null, "", `#/memory?q=${encodeURIComponent(e.target.value)}`); render(true); }, 250);
 });
-window.addEventListener("hashchange", () => { last = ""; render(true); scrollTo(0, 0); });
+window.addEventListener("hashchange", () => { last = ""; pending = null; actionError = ""; render(true); scrollTo(0, 0); });
 render(true);
 setInterval(() => { if (!document.hidden) render(); }, 4000);
 </script>
