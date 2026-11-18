@@ -1,41 +1,107 @@
-"""An idle Codex agent gets woken: when its Stop hook lets it stop, a background waiter watches the board
-and resumes the agent's thread with `codex exec resume` once something needs it."""
+"""Idle Codex agents get woken. Codex's Stop hook marks a thread idle; one wake service per machine
+watches every linked Codex thread and resumes an idle one with `codex exec resume` when the board
+needs its agent."""
 
 import json
 import sys
 import threading
 import time
+from concurrent.futures import Executor, Future
 
-from huddlehut import codex_wake, hook
-from test_hooks import bash, env, link, run  # noqa: F401  (env is a fixture)
+from huddlehut import codex_wake, hook, wake_service
+from test_hooks import env, link, run  # noqa: F401  (env is a fixture)
 
 
-def test_codex_stop_starts_a_waiter_only_when_it_lets_the_agent_stop(env, monkeypatch, capsys):
+class Inline(Executor):
+    """Runs submitted work right away, so a test sees a tick's wakes finish."""
+
+    def submit(self, fn, *args, **kwargs):
+        f = Future()
+        f.set_result(fn(*args, **kwargs))
+        return f
+
+
+def transcript(path, *events):
+    path.write_text("".join(json.dumps({"type": "event_msg", "payload": {"type": e}}) + "\n" for e in events))
+    return str(path)
+
+
+def codex_link(board, me, monkeypatch, capsys, sid="C1", key="", transcript_path=None):
+    inp = {"session_id": sid, "tool_name": "mcp__huddlehut__join_board", "tool_input": {"key": key},
+           "tool_response": [{"type": "text", "text": f"[{board.id} you={me}]\nb [repo]"}]}
+    if transcript_path:
+        inp["transcript_path"] = transcript_path
+    return run("post-tool", inp, monkeypatch, capsys, client="codex")
+
+
+def test_codex_stop_marks_the_thread_idle_and_keeps_the_service_up(env, monkeypatch, capsys, tmp_path):
     store, board, key = env
-    started = []
-    monkeypatch.setenv("HUDDLEHUT_CODEX_WAKE", "1")
-    monkeypatch.setattr(codex_wake.subprocess, "Popen", lambda cmd, **kw: started.append((cmd, kw)))
-    link(board, monkeypatch, capsys, sid="C1", me="codex-cccc")
-    stop = {"session_id": "C1", "cwd": "/work"}
+    ensured = []
+    monkeypatch.setattr(wake_service, "ensure", lambda: ensured.append(1) or True)
+    t = transcript(tmp_path / "t.jsonl", "task_started", "task_complete")
+    codex_link(board, "codex-cccc", monkeypatch, capsys, transcript_path=t)
+    assert hook.load("C1")["client"] == "codex" and hook.load("C1")["transcript"] == t   # recorded on use
 
-    assert run("stop", stop, monkeypatch, capsys, client="codex")[1] is None
-    cmd, kw = started[-1]
-    assert cmd[1:] == ["-m", "huddlehut.codex_wake", "C1", "/work"] and kw["start_new_session"]
+    run("stop", {"session_id": "C1", "cwd": "/work"}, monkeypatch, capsys, client="codex")
+    state = hook.load("C1")
+    assert state["stopped_at"] >= state["active"] and state["awaiting_user"] is False and state["cwd"] == "/work"
+    assert ensured == [1]
 
     store.post(key, "claude-code-aaaa", "who owns ast.py?", "question")
-    assert run("stop", stop, monkeypatch, capsys, client="codex")[1]["decision"] == "block"   # kept going instead
-    run("stop", {**stop, "last_assistant_message": "Ship it?"}, monkeypatch, capsys, client="codex")  # waits on user
-    run("stop", stop, monkeypatch, capsys, client="claude")             # Claude Code has its own wake hook
-    run("stop", {"session_id": "nobody"}, monkeypatch, capsys, client="codex")   # not on a board
+    assert run("stop", {"session_id": "C1"}, monkeypatch, capsys, client="codex")[1]["decision"] == "block"
+    assert ensured == [1]                                                    # kept going: not idle
+    run("stop", {"session_id": "C1", "last_assistant_message": "Ship it?"}, monkeypatch, capsys, client="codex")
+    assert hook.load("C1")["awaiting_user"] is True                          # the service leaves it be
+    link(board, monkeypatch, capsys, sid="S1")
+    run("stop", {"session_id": "S1"}, monkeypatch, capsys, client="claude")  # Claude Code wakes itself
+    assert len(ensured) == 2
+
+
+def test_one_service_per_machine(env, monkeypatch):
+    started = []
+    monkeypatch.setenv("HUDDLEHUT_CODEX_WAKE", "1")
+    monkeypatch.setattr(wake_service.subprocess, "Popen", lambda cmd, **kw: started.append((cmd, kw)))
+    held = wake_service._lock()                                              # a service is running
+    assert wake_service.running() and not wake_service.ensure() and started == []
+    held.close()
+    assert not wake_service.running() and wake_service.ensure()
+    cmd, kw = started[0]
+    assert cmd[1:] == ["-m", "huddlehut.wake_service"] and kw["start_new_session"]
     monkeypatch.setenv("HUDDLEHUT_CODEX_WAKE", "0")
-    run("stop", stop, monkeypatch, capsys, client="codex")
-    assert len(started) == 1
+    assert not wake_service.ensure() and len(started) == 1
 
 
-def test_waiter_resumes_the_thread_when_the_board_needs_it(env, db_url, monkeypatch, capsys, tmp_path):
+def test_due_picks_idle_codex_threads_whose_agent_is_needed(env, tmp_path):
     store, board, key = env
-    monkeypatch.setattr(hook, "WAIT_SECONDS", 10)
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-config"))      # server name falls back to "huddlehut"
+    done = transcript(tmp_path / "done", "task_started", "task_complete")
+    busy = transcript(tmp_path / "busy", "task_complete", "task_started")
+    now = time.time()
+    links = {
+        "idle": {"client": "codex", "me": "codex-0001", "transcript": done},
+        "mid-turn": {"client": "codex", "me": "codex-0002", "transcript": busy},
+        "asks-user": {"client": "codex", "me": "codex-0003", "transcript": done, "awaiting_user": True},
+        "subagent": {"client": "codex", "me": "codex-0004", "transcript": done, "parent": "idle"},
+        "claude": {"client": "claude", "me": "claude-code-0005"},
+        "stopped": {"client": "codex", "me": "codex-0006", "active": now - 9, "stopped_at": now - 5},
+        "unknown": {"client": "codex", "me": "codex-0007", "active": now - 9},   # never seen stopping
+        "left": {"client": "codex", "me": "codex-0008", "transcript": done},
+        "older": {"me": "codex-0009", "transcript": done},                       # linked before client was kept
+    }
+    for k, state in links.items():
+        hook.save(k, {"board": board.id, **state})
+        store.touch(board.id, state["me"])
+    store.mark_left(board.id, "codex-0008")
+    assert {k for k, _ in wake_service.codex_threads()} == set(links) - {"subagent", "claude"}
+    assert wake_service.due(store, wake_service.codex_threads()) == []      # nothing needs anyone yet
+
+    store.post(key, "claude-code-aaaa", "@all rebase on main", "note")
+    assert sorted(k for k, _, _ in wake_service.due(store, wake_service.codex_threads())) == ["idle", "older", "stopped"]
+    assert [k for k, _, _ in wake_service.due(store, wake_service.codex_threads(), busy={"idle", "older"})] == ["stopped"]
+
+
+def test_a_tick_resumes_the_thread_with_what_needs_it(env, db_url, monkeypatch, capsys, tmp_path):
+    store, board, key = env
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-config"))           # server name falls back to "huddlehut"
     calls = tmp_path / "calls.json"
     fake = tmp_path / "codex"
     fake.write_text(f"#!{sys.executable}\nimport json, os, sys\n"
@@ -45,53 +111,42 @@ def test_waiter_resumes_the_thread_when_the_board_needs_it(env, db_url, monkeypa
     fake.chmod(0o755)
     monkeypatch.setenv("HUDDLEHUT_CODEX_BIN", str(fake))
     monkeypatch.setenv("HUDDLEHUT_CODEX_WAKE", "1")
-
-    # the agent joined with its key; the hook keeps it for the wake prompt
-    joined = [{"type": "text", "text": f"[{board.id} you=codex-cccc]\nparser [repo]"}]
-    run("post-tool", {"session_id": "C1", "tool_name": "mcp__huddlehut__join_board",
-                      "tool_input": {"key": key, "nickname": "acorn"}, "tool_response": joined},
-        monkeypatch, capsys, client="codex")
+    monkeypatch.setattr(wake_service, "ensure", lambda: False)
+    t = transcript(tmp_path / "t.jsonl", "task_started", "task_complete")
+    codex_link(board, "codex-cccc", monkeypatch, capsys, key=key, transcript_path=t)
     store.set_nickname(board.id, "codex-cccc", "acorn")
+    run("stop", {"session_id": "C1", "cwd": str(tmp_path)}, monkeypatch, capsys, client="codex")
 
-    result = {}
-    waiter = threading.Thread(target=lambda: result.update(code=codex_wake.run("C1", str(tmp_path))))
-    waiter.start()
-    time.sleep(0.3)
-    store.post(key, "claude-code-aaaa", "fyi lexer merged", "note")      # doesn't need it: keeps waiting
-    time.sleep(0.3)
-    assert not calls.exists()
+    busy = set()
+    store.post(key, "claude-code-aaaa", "fyi lexer merged", "note")         # doesn't need it
+    assert wake_service.tick(store, busy, Inline()) == [] and not calls.exists()
     store.post(key, "claude-code-aaaa", "@acorn are the seeds rebuilt?", "note")
-    waiter.join(10)
+    assert wake_service.tick(store, busy, Inline()) == ["C1"] and busy == set()
 
-    assert result["code"] == 0
     call = json.loads(calls.read_text())
     argv = call["argv"]
     assert argv[:5] == ["exec", "--skip-git-repo-check", "-C", str(tmp_path), "resume"]
     assert argv[5:7] == ["-c", 'mcp_servers.huddlehut.env.HUDDLEHUT_SESSION="C1"']
     assert f"mcp_servers.huddlehut.env.HUDDLEHUT_DATABASE_URL={json.dumps(db_url)}" in argv  # same database
-    assert argv[-2] == "C1"
-    prompt = argv[-1]
-    assert "@acorn are the seeds rebuilt?" in prompt
-    assert f"join_board(key='{key}', nickname='acorn')" in prompt
-    assert call["waking"]                                                 # its SessionEnd won't mark acorn left
-    assert store.identity("codex:C1", "codex-zzzz") == "codex-cccc"      # its board server comes back as acorn
-    assert store.unread(board.id, "codex-cccc") == []                     # delivered once
-    assert "waking_until" not in hook.load("C1")
+    assert argv[-2] == "C1" and "@acorn are the seeds rebuilt?" in argv[-1]
+    assert f"join_board(key='{key}', nickname='acorn')" in argv[-1]
+    assert call["waking"]                                                    # its SessionEnd won't mark acorn left
+    assert store.identity("codex:C1", "codex-zzzz") == "codex-cccc"         # its board server comes back as acorn
+    assert store.unread(board.id, "codex-cccc") == [] and "waking_until" not in hook.load("C1")
     assert "waking codex-cccc for" in (hook.HOME / "wake.log").read_text()
+    assert wake_service.tick(store, busy, Inline()) == []                   # delivered once
 
 
-def test_waiter_steps_aside_when_codex_works_again(env, monkeypatch, capsys):
-    store, board, key = env
-    monkeypatch.setattr(hook, "WAIT_SECONDS", 10)
-    link(board, monkeypatch, capsys, sid="C1", me="codex-cccc")
-    result = {}
-    waiter = threading.Thread(target=lambda: result.update(code=codex_wake.run("C1", "/")))
-    waiter.start()
-    time.sleep(0.3)
-    run("post-tool", bash("C1"), monkeypatch, capsys, client="codex")    # the user gave it a new turn
-    store.post(key, "claude-code-aaaa", "@codex-cccc ping", "note")
-    waiter.join(5)
-    assert not waiter.is_alive() and result["code"] is None
+def test_service_runs_alone_and_leaves_when_nothing_is_linked(env, monkeypatch):
+    monkeypatch.setattr(wake_service, "LINGER", 0.2)
+    monkeypatch.setattr(wake_service, "POLL", 0.05)
+    held = wake_service._lock()
+    assert wake_service.serve() == 0                                         # another one runs: step aside
+    held.close()
+    done = threading.Event()
+    threading.Thread(target=lambda: (wake_service.serve(), done.set()), daemon=True).start()
+    assert done.wait(5)
+    assert "stopped: no Codex threads to watch" in (hook.HOME / "wake.log").read_text()
 
 
 def test_session_end_of_a_woken_turn_keeps_the_agent_on_the_board(env, monkeypatch, capsys):

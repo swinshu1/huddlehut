@@ -13,7 +13,7 @@ One entry point for Claude Code and Codex (`--client` picks the output format):
   session-start  after compaction or resume: re-injects the board view (no model call).
   stop           before the agent ends its turn: if a question, blocker or reply to it is unread, or
                  it has an open promise it hasn't been reminded of, keeps it going once. When it lets
-                 a Codex agent stop, starts a background waiter that can wake it (codex_wake.py).
+                 a Codex agent stop, marks the thread idle for the wake service (wake_service.py).
   session-end    marks the agent as left; if it leaves promises unkept, posts a blocker saying so,
                  so nobody waits forever.
   wait           Claude Code only, as an asyncRewake Stop hook: after the agent goes idle, waits up
@@ -352,6 +352,34 @@ def end_subagents(parent: str, everyone: bool = False) -> list[str]:
     return ended
 
 
+def _seen(state: dict, inp: dict, client: str, now: float) -> None:
+    """The conversation just did something: when, which client, and its transcript (the wake service
+    reads it to tell an idle Codex thread from a busy one)."""
+    state["active"] = now
+    state["client"] = client
+    if inp.get("transcript_path"):
+        state["transcript"] = inp["transcript_path"]
+
+
+def _went_idle(inp: dict) -> None:
+    """A Codex thread ended its turn: mark it idle (and whether it waits on the user) and make sure
+    the wake service runs, so the board can wake it later."""
+    sid = inp.get("session_id") or ""
+    state = load(sid)
+    if not state:
+        return
+    state |= {"client": "codex", "stopped_at": time.time(),
+              "awaiting_user": awaiting_user(inp.get("last_assistant_message"))}
+    if inp.get("cwd"):
+        state["cwd"] = inp["cwd"]
+    if inp.get("transcript_path"):
+        state["transcript"] = inp["transcript_path"]
+    save(sid, state)
+    from . import wake_service
+
+    wake_service.ensure()
+
+
 # ---- events -----------------------------------------------------------------
 
 
@@ -379,16 +407,14 @@ def post_tool(inp: dict, client: str) -> dict | None:
                 state["key"] = key.group(0)
             if parent:
                 state["parent"] = parent  # its parent's hooks end it
-            if inp.get("transcript_path"):
-                state["transcript"] = inp["transcript_path"]
         if state:
-            state["active"] = now
+            _seen(state, inp, client, now)
             save(sid, state)
         return None  # the board tool's own result already carried any new messages
     state = load(sid)
     if not state:
         return None  # not on a board: no database access, no git
-    state["active"] = now
+    _seen(state, inp, client, now)
     command = str((inp.get("tool_input") or {}).get("command", "")) if tool == "Bash" else ""
     committed = "git" in command and "commit" in command
     edited = _edited_paths(tool, inp.get("tool_input") or {})
@@ -553,6 +579,10 @@ def session_start(inp: dict, client: str) -> dict | None:
     source = inp.get("source")
     sid = inp.get("session_id") or ""
     state = load(sid)
+    if client == "codex" and state:
+        from . import wake_service
+
+        wake_service.ensure()  # after a reboot or app restart, the first linked thread brings it back
     if source not in ("compact", "resume") or not state:
         return None
     from .compact import render_view
@@ -573,9 +603,7 @@ def stop(inp: dict, client: str) -> dict | None:
         end_subagents(inp.get("session_id") or "")
     out = _stop(inp, client)
     if out is None and client == "codex":
-        from . import codex_wake
-
-        codex_wake.spawn(inp)  # Codex can't be rewoken by a hook; a background waiter resumes it instead
+        _went_idle(inp)  # Codex can't be rewoken by a hook; the wake service resumes it instead
     return out
 
 

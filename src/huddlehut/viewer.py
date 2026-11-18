@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .compact import presence_tag
 from .mentions import names_agents
+from . import wake_service
 from .service import distill_in_background, sweep_stale_sessions
 from .store import IDLE_AFTER, MAX_POST_CHARS, USER, BoardError, Message, Store, short_id, short_model
 
@@ -125,6 +126,7 @@ class Viewer:
             elif PING_ONLY.fullmatch(content):
                 content += " take a look at the board"
             m = self.store.post_to(b, USER, content, kind="question" if content.endswith("?") else "note")
+        wake_service.ensure()  # idle Codex agents get woken by it
         return {"ok": True, "id": m.id}
 
     def set_goal(self, board_id: str, goal: str) -> dict:
@@ -276,6 +278,7 @@ def serve(host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True, 
     httpd = ThreadingHTTPServer((host, port), make_handler(viewer))
     url = f"http://{host}:{httpd.server_address[1]}"
     print(f"Huddle Hut viewer at {url} (Ctrl-C to stop)", flush=True)
+    wake_service.ensure()
     if open_browser:
         threading.Timer(0.3, lambda: webbrowser.open(url)).start()
     try:
