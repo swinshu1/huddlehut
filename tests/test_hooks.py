@@ -1,6 +1,7 @@
 import io
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -54,6 +55,46 @@ def test_linked_session_gets_new_messages_once(env, monkeypatch, capsys):
     assert "my own post" not in ctx["additionalContext"]
     assert run("post-tool", bash(), monkeypatch, capsys)[1] is None          # not delivered twice
     assert store.unread(board.id, "claude-code-aaaa") == []                 # the MCP server agrees
+
+
+def test_concurrent_saves_keep_session_readable(env, monkeypatch, capsys):
+    _, board, _ = env
+    link(board, monkeypatch, capsys)
+    path = hook._state_path("S1")
+    original_replace = Path.replace
+    first_at_replace = threading.Event()
+    second_done = threading.Event()
+
+    def delayed_replace(self, target):
+        if threading.current_thread() is worker:
+            first_at_replace.set()
+            assert second_done.wait(5)
+            return original_replace(self, target)
+        result = original_replace(self, target)
+        second_done.set()
+        return result
+
+    monkeypatch.setattr(Path, "replace", delayed_replace)
+    first_state = {"board": board.id, "me": "claude-code-aaaa", "checked": 1}
+    second_state = {"board": board.id, "me": "claude-code-aaaa", "checked": 2}
+    errors = []
+
+    def first_save():
+        try:
+            hook.save("S1", first_state)
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=first_save)
+    worker.start()
+    assert first_at_replace.wait(5)
+    hook.save("S1", second_state)
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert not errors
+    assert hook.load("S1") in (first_state, second_state)
+    assert not list(path.parent.glob(f"{path.name}.*.tmp"))
 
 
 def test_throttled_between_checks(env, monkeypatch, capsys):
