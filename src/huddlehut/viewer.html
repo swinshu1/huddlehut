@@ -363,7 +363,7 @@ function board(d) {
   const pingAll = b.status === "open" && anyLive ? `<button class="ping-all" data-ping="all" title="ask every agent on this board to look at it" aria-label="ping all">ping all</button>` : "";
   const sayErr = actionError && errAt === "say" ? `<p class="err">${esc(actionError)}</p>` : "";
   const composer = b.status === "open" ? `<div class="composer"><input id="say" value="${esc(sayDraft)}" maxlength="1000" autocomplete="off"
-      placeholder="message the huddlers. @name pings one, @all pings everyone" aria-label="message the huddlers"><button class="btn primary" id="send"${working ? " disabled" : ""}>send</button></div>${sayErr}` : "";
+      placeholder="message everyone, or @name to message one huddler" aria-label="message the huddlers"><button class="btn primary" id="send"${working ? " disabled" : ""}>send</button></div>${sayErr}` : "";
   const err = actionError && errAt === "panel" ? `<p class="err">${esc(actionError)}</p>` : "";
   const busy = working ? " disabled" : "";
   const closePanel = pending && pending.type === "close" && b.status === "open" ? `<div class="confirm" role="group" aria-label="close board">
