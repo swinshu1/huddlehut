@@ -18,7 +18,10 @@ from urllib.parse import parse_qs, urlparse
 
 from .compact import presence_tag
 from .service import distill_in_background, sweep_stale_sessions
-from .store import IDLE_AFTER, MAX_POST_CHARS, BoardError, Message, Store, short_id, short_model
+from .store import IDLE_AFTER, MAX_POST_CHARS, USER, BoardError, Message, Store, short_id, short_model
+
+
+PING_ONLY = re.compile(r"(?:@[\w-]+[\s,]*)+")
 
 
 def _asks_user(name: str):
@@ -105,8 +108,21 @@ class Viewer:
     def _open_board(self, board_id: str):
         b = self.store.get_board(board_id)
         if b.status != "open":
-            raise BoardError("this board is closed; reopen it to change its goal")
+            raise BoardError("this board is closed; reopen it first")
         return b
+
+    def post(self, board_id: str, content: str) -> dict:
+        """The user says something on the board. @name pings one agent, @all everyone: a mention wakes an idle
+        Claude Code agent, and others see it on their next turn. A bare ping asks them to look at the board."""
+        content = content.strip()
+        if not content:
+            raise BoardError("say something first")
+        if PING_ONLY.fullmatch(content):
+            content += " take a look at the board"
+        with self.lock:
+            b = self._open_board(board_id)
+            m = self.store.post_to(b, USER, content, kind="question" if content.endswith("?") else "note")
+        return {"ok": True, "id": m.id}
 
     def set_goal(self, board_id: str, goal: str) -> dict:
         goal = " ".join(goal.split())[:1000]
@@ -210,6 +226,8 @@ def make_handler(viewer: Viewer):
                         self._json(viewer.set_me(str(body.get("name") or "")))
                     case ["api", "boards", b, "agents", agent, "end"]:
                         self._json(viewer.end_session(b, agent))
+                    case ["api", "boards", b, "post"]:
+                        self._json(viewer.post(b, str(body.get("content") or "")))
                     case ["api", "boards", b, "close"]:
                         self._json(viewer.close_board(b, str(body.get("outcome") or "")))
                     case ["api", "boards", b, "goal"]:

@@ -38,7 +38,7 @@ def test_name_shows_everywhere_including_old_posts(store):
     assert store.labels(board.id)["user"] == "michelle"
     view = render_view(store, store.get_board(board.id))[0]
     assert "User: michelle (@michelle or @user)" in view
-    assert "michelle/decision: @all new goal: ship it" in view
+    assert "michelle (user)/decision: @all new goal: ship it" in view
 
 
 @pytest.fixture
@@ -83,3 +83,43 @@ def test_cli_sets_the_name(db_url, monkeypatch, capsys, tmp_path):
     assert cli.main(["config", "--name", "michelle"]) == 0
     assert "You're michelle on the boards." in capsys.readouterr().out
     assert cli.main(["config", "--name", "all"]) == 1
+
+
+def test_user_pings_agents_from_the_viewer(served):
+    """A ping is a post from the user that mentions agents; the hooks' wake logic treats it like any mention."""
+    from huddlehut.hook import _needs_me
+
+    store, base = served
+    board, key = store.create_board("b", "p", "claude-code-1a2b")
+    store.set_nickname(board.id, "claude-code-1a2b", "mochi")
+    store.set_nickname(board.id, "codex-3f2a", "acorn")
+    url = f"{base}/api/boards/{board.id}/post"
+    with pytest.raises(urllib.error.HTTPError) as e:                    # no header: refused
+        _req(url, {"content": "@mochi"})
+    assert e.value.code == 403
+    h = {"X-Huddlehut": "1"}
+
+    _req(url, {"content": "@mochi"}, h)                                   # a bare ping gets a nudge
+    _req(url, {"content": "@all, ship it today?"}, h)
+    _req(url, {"content": "thanks all"}, h)
+    msgs = store.all_messages(board.id)
+    assert [(m.author, m.kind, m.content) for m in msgs] == [
+        ("user", "note", "@mochi take a look at the board"),
+        ("user", "question", "@all, ship it today?"),
+        ("user", "note", "thanks all"),
+    ]
+    woken = lambda agent: [m.id for m in _needs_me(store, board.id, agent, msgs)]  # noqa: E731
+    assert woken("claude-code-1a2b") == [msgs[0].id, msgs[1].id]         # pinged by name, then @all
+    assert woken("codex-3f2a") == [msgs[1].id]
+
+    store.set_user_name("juniper")                                        # agents see who it's from
+    from huddlehut.compact import render_entries
+    assert render_entries(store, msgs[:1]) == f"#{msgs[0].id} juniper (user): @mochi take a look at the board"
+
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _req(url, {"content": "   "}, h)
+    assert json.loads(e.value.read())["error"] == "say something first"
+    store.close_board(key, "user")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _req(url, {"content": "@mochi"}, h)
+    assert "closed" in json.loads(e.value.read())["error"]

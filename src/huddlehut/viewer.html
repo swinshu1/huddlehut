@@ -134,6 +134,17 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
 .end:hover { color: var(--fg); background: var(--bg); }
 @media (hover: none) { .end { opacity: .6; } }
 .roster .agent { display: inline-flex; align-items: baseline; gap: 6px; cursor: default; }
+.ping { border-radius: 999px; }
+.ping:hover .who { box-shadow: 0 0 0 1.5px hsl(var(--hue) 45% var(--chip-fg)); }
+.ping-all { margin-left: auto; font-size: 12.5px; font-weight: 400; color: var(--muted); padding: 1px 10px; border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--line); }
+.ping-all:hover { color: var(--fg); box-shadow: 0 0 0 1px var(--muted); }
+.composer { display: flex; gap: 8px; margin-top: 28px; }
+.composer input { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 0; border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--line); padding: 7px 14px; }
+.composer input:focus { outline: none; box-shadow: 0 0 0 1px var(--fg); }
+.composer input::placeholder { color: var(--muted); }
+.composer + .err { margin-left: 14px !important; }
 .roster .sub { font-size: 12px; color: var(--muted); }
 .waiting { list-style: none; margin: 32px 0 0; padding: 0; }
 .waiting li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; gap: 14px; padding: 12px 14px;
@@ -244,6 +255,7 @@ let boards = [], last = "";
 let pending = null, outcomeDraft = "", actionError = "", working = false;  // inline confirm panel state
 let errAt = "panel", goalDraft = null, msDraft = "", cur = null;  // goal editing; cur = the board on screen
 let me = "user", meDraft = null, meError = "";  // your name, shown instead of "user"
+let sayDraft = "";  // the message box under the huddlers
 const open = new Set();
 
 function long(text, key) {
@@ -333,8 +345,11 @@ function board(d) {
     const files = a.files.map(f => f.path + (f.locked ? " (locked)" : "")).join("\n");
     const sub = [a.model, a.tag].filter(Boolean).join(", ");
     const name = a.name || short(id);
-    const end = a.state === "left" || b.status !== "open" ? "" : `<button class="end" data-end="${esc(id)}" data-name="${esc(name)}" title="end session" aria-label="end ${esc(name)}'s session">×</button>`;
-    return `<span class="agent" title="${esc(id + (files ? "\nfiles:\n" + files : ""))}">${who(id, a.name)}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}${end}</span>`;
+    const live = a.state !== "left" && b.status === "open";
+    const later = id.startsWith("codex") ? " (codex can't be woken while idle; it sees this on its next turn)" : "";
+    const pill = live ? `<button class="ping" style="--hue:${hue(id)}" data-ping="${esc(name)}" title="ping ${esc(name)} to look at the board${later}" aria-label="ping ${esc(name)}">${who(id, a.name)}</button>` : who(id, a.name);
+    const end = live ? `<button class="end" data-end="${esc(id)}" data-name="${esc(name)}" title="end session" aria-label="end ${esc(name)}'s session">×</button>` : "";
+    return `<span class="agent" title="${esc(id + (files ? "\nfiles:\n" + files : ""))}">${pill}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}${end}</span>`;
   }).join("");
   const logo = document.querySelector(".brand svg").outerHTML;
   const waiting = d.waiting.length ? `<ul class="waiting">${d.waiting.map(w => `<li>${who(w.author, w.name)}
@@ -345,6 +360,11 @@ function board(d) {
   const outcome = b.status !== "open" && b.outcome ? `<p class="goal dim">outcome: ${esc(b.outcome)}</p>` : "";
   const stream = d.stream.length ? logList(d.stream) : '<p class="dim">nothing posted yet.</p>';
   const close = b.status === "open" && !pending ? `<button class="closeb" id="close-board">close board</button>` : "";
+  const anyLive = agents.some(([, a]) => a.state !== "left");
+  const pingAll = b.status === "open" && anyLive ? `<button class="ping-all" data-ping="all" title="ask every agent on this board to look at it" aria-label="ping all">ping all</button>` : "";
+  const sayErr = actionError && errAt === "say" ? `<p class="err">${esc(actionError)}</p>` : "";
+  const composer = b.status === "open" ? `<div class="composer"><input id="say" value="${esc(sayDraft)}" maxlength="1000" autocomplete="off"
+      placeholder="message the huddlers. @name pings one, @all pings everyone" aria-label="message the huddlers"><button class="btn primary" id="send"${working ? " disabled" : ""}>send</button></div>${sayErr}` : "";
   const err = actionError && errAt === "panel" ? `<p class="err">${esc(actionError)}</p>` : "";
   const busy = working ? " disabled" : "";
   const closePanel = pending && pending.type === "close" && b.status === "open" ? `<div class="confirm" role="group" aria-label="close board">
@@ -357,8 +377,8 @@ function board(d) {
   return `${close}<h1 class="title">${esc(b.name)}</h1>
     <div class="meta">${esc(b.project)}, ${b.status === "open" ? "open" : "closed"} since ${day(b.status === "open" ? b.created_at : b.closed_at || b.created_at)}</div>
     ${goalBox(d)}${outcome}${closePanel}
-    ${roster ? `<div class="huddlers"><div class="huddlers-label">${logo}huddlers<span class="count">${here} here now</span></div><div class="roster">${roster}</div></div>` : ""}${endPanel}
-    ${waiting}
+    ${roster ? `<div class="huddlers"><div class="huddlers-label">${logo}huddlers<span class="count">${here} here now</span>${pingAll}</div><div class="roster">${roster}</div></div>` : ""}${endPanel}
+    ${waiting}${composer}
     <div class="stream">${stream}${older}${lessons}</div>`;
 }
 
@@ -400,7 +420,7 @@ async function render(force = false) {
   }
   side(r);
   if (!force && html === last) return;
-  const focused = document.activeElement && ["q", "outcome", "goal-input", "ms-input"].includes(document.activeElement.id) ? document.activeElement.id : null;
+  const focused = document.activeElement && ["q", "outcome", "goal-input", "ms-input", "say"].includes(document.activeElement.id) ? document.activeElement.id : null;
   const caret = focused ? document.activeElement.selectionStart : 0;
   last = html;
   $("#main").innerHTML = html;
@@ -431,6 +451,15 @@ async function act(url, body, onOk, where = "panel") {
 }
 const closeBoard = () => act(`/api/boards/${route().board}/close`, {outcome: outcomeDraft});
 const endSession = () => act(`/api/boards/${route().board}/agents/${encodeURIComponent(pending.agent)}/end`);
+const say = () => sayDraft.trim() && act(`/api/boards/${route().board}/post`, {content: sayDraft}, () => { sayDraft = ""; }, "say");
+async function pingTo(name) {  // put "@name " in the message box; Enter sends it, with or without a note
+  const tag = "@" + name;
+  if (!new RegExp(`(^|\\s)${tag}(?![\\w-])`, "i").test(sayDraft)) sayDraft = `${tag} ${sayDraft.trim()}`.trimEnd() + " ";
+  actionError = "";
+  await render(true);
+  const f = document.getElementById("say");
+  if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); }
+}
 const goalAct = (path, body, onOk) => act(`/api/boards/${route().board}/${path}`, body, onOk, "goal");
 const saveGoal = () => goalAct("goal", {goal: goalDraft}, () => { goalDraft = null; });
 const addMilestone = () => msDraft.trim() && goalAct("milestones", {text: msDraft}, () => { msDraft = ""; });
@@ -453,6 +482,9 @@ document.addEventListener("click", e => {
   if (e.target.id === "do-end") { endSession(); return; }
   if (e.target.id === "cancel") { pending = null; actionError = ""; render(true); return; }
   if (e.target.closest("#edit-me")) { editMe(); return; }
+  if (e.target.id === "send") { say(); return; }
+  const pg = e.target.closest("[data-ping]");
+  if (pg) { pingTo(pg.dataset.ping); return; }
   if (e.target.id === "edit-goal") { editGoal(); return; }
   if (e.target.id === "save-goal") { saveGoal(); return; }
   if (e.target.id === "cancel-goal") { goalDraft = null; actionError = ""; render(true); return; }
@@ -468,6 +500,11 @@ document.addEventListener("click", e => {
   if (m) { open.add(m.dataset.open); render(true); }
 });
 document.addEventListener("keydown", e => {
+  if (e.target.id === "say") {
+    if (e.key === "Enter") say();
+    if (e.key === "Escape") { sayDraft = ""; e.target.value = ""; }
+    return;
+  }
   if (e.target.id === "me-input") {
     if (e.key === "Enter") saveMe();
     if (e.key === "Escape") { meDraft = null; meError = ""; renderMe(); }
@@ -491,12 +528,13 @@ document.addEventListener("input", e => {
   if (e.target.id === "outcome") { outcomeDraft = e.target.value; return; }
   if (e.target.id === "goal-input") { goalDraft = e.target.value; return; }
   if (e.target.id === "me-input") { meDraft = e.target.value; return; }
+  if (e.target.id === "say") { sayDraft = e.target.value; return; }
   if (e.target.id === "ms-input") { msDraft = e.target.value; return; }
   if (e.target.id !== "q") return;
   clearTimeout(window._t);
   window._t = setTimeout(() => { history.replaceState(null, "", `#/memory?q=${encodeURIComponent(e.target.value)}`); render(true); }, 250);
 });
-window.addEventListener("hashchange", () => { last = ""; pending = null; actionError = ""; goalDraft = null; msDraft = ""; render(true); scrollTo(0, 0); });
+window.addEventListener("hashchange", () => { last = ""; pending = null; actionError = ""; goalDraft = null; msDraft = ""; sayDraft = ""; render(true); scrollTo(0, 0); });
 render(true);
 renderMe();
 get("/api/me").then(d => { me = d.name; if (meDraft === null) renderMe(); }).catch(() => {});
