@@ -24,7 +24,7 @@ from mcp.server.mcpserver import MCPServer
 
 from .compact import join_board as _join
 from .claims import normalize
-from .compact import render_entries, render_files
+from .compact import render_entries, render_files, render_progress
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
 from .store import BoardError, Store
 
@@ -40,6 +40,8 @@ Editing claims a file for you; files(claim=[...]) before touching more, files(lo
 files(release=["*"]) when done. Committed files release themselves.
 Write caveman: no articles, filler, pleasantries. Keep paths, negations, why. No made-up abbreviations. 1-3 lines.
 Report outcomes, not metrics: "tests pass", not "474 pass, ruff+mypy clean". Numbers only when something fails.
+Goal: join shows board goal + milestones (m<id>). Work toward it; goal(done=[id]) when you finish one, \
+goal(add=[...]) to break it down.
 Stay on the board until it's closed: new msgs arrive in post results and hook notes; if neither has shown up for a
 while, call read_messages() between steps. Lines starting "@you" mention you: answer on the board (reply_to) before
 other work. @mention huddlers by nickname (@mochi); mentions only reach agents on this board (join lists them);
@@ -261,6 +263,44 @@ async def read_messages(wait_seconds: int = 0, since_id: int = -1, key: str = ""
     board_id = store.board_for_key(k).id
     body = _flag_mentions(board_id, new, render_entries(store, new)) if new else "(nothing new)"
     return body + f"\nlast_id={last}{tail}" + S.nudge(board_id)
+
+
+def _milestone_id(x) -> int:
+    try:
+        return int(str(x).strip().lstrip("mM#"))
+    except ValueError:
+        raise BoardError(f"milestone id {x!r}? use the number after m, e.g. 7 for m7") from None
+
+
+@tool
+def goal(done: list[int | str] | None = None, undo: list[int | str] | None = None, add: list[str] | None = None,
+         key: str = "") -> str:
+    """Board's shared goal + milestones. done: milestone ids you finished. undo: reopen. add: new milestones. Returns progress."""
+    try:
+        k = S.use(key)
+        board = store.board_for_key(k)
+        finished, reopened = [], []
+        for x in done or []:
+            m = store._milestone(board.id, _milestone_id(x))
+            if not m["done_at"]:
+                finished.append(store.set_milestone_done(board.id, m["id"], AUTHOR)["text"])
+        for x in undo or []:
+            m = store._milestone(board.id, _milestone_id(x))
+            if m["done_at"]:
+                reopened.append(store.set_milestone_done(board.id, m["id"], AUTHOR, done=False)["text"])
+        added = [store.add_milestone(board.id, t, AUTHOR)["text"] for t in add or [] if t.strip()]
+        # the stream shows progress too, so others (and the user) see it without asking
+        if finished:
+            store.post(k, AUTHOR, "milestone done: " + "; ".join(finished), kind="result")
+        if reopened:
+            store.post(k, AUTHOR, "milestone reopened: " + "; ".join(reopened), kind="note")
+        if added:
+            store.post(k, AUTHOR, "milestone added: " + "; ".join(added), kind="note")
+        board = store.get_board(board.id)
+    except BoardError as e:
+        return f"error: {e}"
+    lines = [f"goal: {board.goal}" if board.goal else "", render_progress(store, board.id)]
+    return "\n".join(ln for ln in lines if ln) or "(no goal or milestones yet)"
 
 
 @tool

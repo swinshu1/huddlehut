@@ -29,7 +29,7 @@ def test_claude_and_codex_sessions_share_a_board(db_url):
             await codex.initialize()
             tools = {t.name for t in (await codex.list_tools()).tools}
             assert tools == {"create_board", "join_board", "post", "read_messages", "files",
-                             "close_board", "reopen_board", "search_memories"}
+                             "close_board", "reopen_board", "search_memories", "goal"}
 
             # no board yet -> helpful error, no crash
             assert (await _call(codex, "post", content="hi")).startswith("error: no board.")

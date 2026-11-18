@@ -138,6 +138,16 @@ def render_files(store: Store, board_id: str, per_agent: int = 8) -> str:
     return "Files:\n" + "\n".join(lines)
 
 
+def render_progress(store: Store, board_id: str) -> str:
+    """Milestones toward the board's goal: "Progress 1/3, todo: m7 lexer spans; m9 parser tests"."""
+    ms = store.milestones(board_id)
+    if not ms:
+        return ""
+    todo = [m for m in ms if not m["done_at"]]
+    rest = ("todo: " + "; ".join(f"m{m['id']} {m['text']}" for m in todo)) if todo else "all milestones done"
+    return f"Progress {len(ms) - len(todo)}/{len(ms)}, {rest}"
+
+
 def render_view(store: Store, board: Board) -> tuple[str, int]:
     """The joiner's view and the board's newest message id."""
     statuses = store.current_statuses(board.id)
@@ -159,6 +169,9 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
 
     head = f"{board.name} [{board.project}]" + ("" if board.status == "open" else f" ({board.status})")
     parts = [head + (f" goal: {board.goal}" if board.goal else "")]
+    progress = render_progress(store, board.id)
+    if progress:
+        parts.append(progress)
     here = [label(a) + presence_tag(p) for a, p in sorted(seen.items(), key=lambda kv: -kv[1]["seen_at"])
             if p["state"] != "left"]
     if here:

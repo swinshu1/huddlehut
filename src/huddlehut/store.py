@@ -176,6 +176,10 @@ CREATE TABLE IF NOT EXISTS claims (
     board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
     since REAL NOT NULL, locked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (board_id, toplevel, path)
 );
+CREATE TABLE IF NOT EXISTS milestones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, board_id TEXT NOT NULL REFERENCES boards(id), text TEXT NOT NULL,
+    position REAL NOT NULL, created_by TEXT NOT NULL, created_at REAL NOT NULL, done_by TEXT, done_at REAL
+);
 CREATE TABLE IF NOT EXISTS memories (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     board_id      TEXT NOT NULL REFERENCES boards(id),
@@ -223,6 +227,10 @@ POSTGRES_SCHEMA = [
         board_id TEXT NOT NULL, toplevel TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, agent TEXT NOT NULL,
         since DOUBLE PRECISION NOT NULL, locked INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (board_id, toplevel, path))""",
     "ALTER TABLE claims ADD COLUMN IF NOT EXISTS locked INTEGER NOT NULL DEFAULT 0",
+    """CREATE TABLE IF NOT EXISTS milestones (
+        id BIGSERIAL PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), text TEXT NOT NULL,
+        position DOUBLE PRECISION NOT NULL, created_by TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL,
+        done_by TEXT, done_at DOUBLE PRECISION)""",
     """CREATE TABLE IF NOT EXISTS memories (
         id BIGSERIAL PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), project TEXT NOT NULL,
         title TEXT NOT NULL, technique TEXT NOT NULL, when_to_apply TEXT NOT NULL,
@@ -884,6 +892,47 @@ class Store:
         return self.db.execute(
             f"DELETE FROM claims WHERE board_id=? AND agent=? AND path IN ({q})", (board_id, agent, *paths)
         ).rowcount
+
+    # ---- collective goal ---------------------------------------------------
+    # The board's goal plus a checklist of milestones everyone works toward. The user sets them in the
+    # viewer; agents check milestones off with the goal tool.
+
+    def milestones(self, board_id: str) -> list[dict]:
+        return [dict(r) for r in self._all(
+            "SELECT * FROM milestones WHERE board_id=? ORDER BY position, id", (board_id,))]
+
+    def add_milestone(self, board_id: str, text: str, by: str) -> dict:
+        text = " ".join(text.split())[:300]
+        if not text:
+            raise BoardError("empty milestone")
+        pos = (self._one("SELECT COALESCE(MAX(position), 0) AS p FROM milestones WHERE board_id=?", (board_id,))["p"]
+               or 0) + 1
+        row = self._one("INSERT INTO milestones (board_id, text, position, created_by, created_at)"
+                        " VALUES (?, ?, ?, ?, ?) RETURNING id", (board_id, text, pos, by, time.time()))
+        return self._milestone(board_id, row["id"])
+
+    def _milestone(self, board_id: str, mid: int) -> dict:
+        row = self._one("SELECT * FROM milestones WHERE id=? AND board_id=?", (mid, board_id))
+        if not row:
+            raise BoardError(f"no milestone {mid} on this board")
+        return dict(row)
+
+    def set_milestone_done(self, board_id: str, mid: int, by: str, done: bool = True) -> dict:
+        self._milestone(board_id, mid)
+        if done:
+            self.db.execute("UPDATE milestones SET done_by=?, done_at=? WHERE id=? AND done_at IS NULL",
+                            (by, time.time(), mid))
+        else:
+            self.db.execute("UPDATE milestones SET done_by=NULL, done_at=NULL WHERE id=?", (mid,))
+        return self._milestone(board_id, mid)
+
+    def delete_milestone(self, board_id: str, mid: int) -> None:
+        self._milestone(board_id, mid)
+        self.db.execute("DELETE FROM milestones WHERE id=?", (mid,))
+
+    def set_goal(self, board_id: str, goal: str) -> Board:
+        self.db.execute("UPDATE boards SET goal=? WHERE id=?", (" ".join(goal.split())[:1000], board_id))
+        return self.get_board(board_id)
 
     # ---- viewer -------------------------------------------------------------
 
