@@ -113,3 +113,16 @@ def test_departure_is_quiet_unless_a_promise_is_left(store):
     store.post(key, "codex-2222", "post when seeds rebuilt", "promise")
     m = store.end_session(board.id, "codex-2222", by="codex-2222", reason="ended", announce=False)
     assert m.kind == "blocker" and "post when seeds rebuilt" in m.content and "Unkept promise" in m.content
+
+
+def test_a_long_busy_turn_still_reads_as_busy(tmp_path):
+    """A turn can write megabytes after its task_started; the reader looks back past them."""
+    path = tmp_path / "long.jsonl"
+    filler = json.dumps({"type": "response_item", "payload": {"type": "function_call_output", "output": "x" * 5000}})
+    with open(path, "w") as f:
+        f.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+        f.write(json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n")
+        for _ in range(400):                                                   # ~2 MB of tool output
+            f.write(filler + "\n")
+    assert hook.thread_running(str(path)) is True
+    assert hook.thread_running(str(path), limit=1 << 16) is None              # past the limit: unknown

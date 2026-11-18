@@ -77,8 +77,19 @@ def codex_threads() -> list[tuple[str, dict]]:
     return found
 
 
-def idle(state: dict) -> bool:
-    running = hook.thread_running(state.get("transcript"))
+def transcript_of(key: str, state: dict) -> str | None:
+    """The thread's transcript: what its hooks recorded, else Codex's own file for that thread id
+    ($CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl), so links made before hooks
+    recorded transcripts are covered without waiting for the agent to act."""
+    if state.get("transcript") and os.path.exists(state["transcript"]):
+        return state["transcript"]
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    found = sorted(home.glob(f"sessions/*/*/*/rollout-*-{key}.jsonl"))
+    return str(found[-1]) if found else None
+
+
+def idle(key: str, state: dict) -> bool:
+    running = hook.thread_running(transcript_of(key, state))
     if running is not None:
         return not running
     return 0 < state.get("active", 0) <= state.get("stopped_at", 0)  # no transcript: go by the Stop hook
@@ -99,7 +110,7 @@ def due(store, links, busy=frozenset()) -> list[tuple[str, dict, list]]:
         if board.status != "open" or (store.presence(board.id).get(state["me"]) or {}).get("state") == "left":
             continue
         msgs = store.unread(board.id, state["me"])
-        if hook._needs_me(store, board.id, state["me"], msgs) and idle(state):  # cheap checks first
+        if hook._needs_me(store, board.id, state["me"], msgs) and idle(key, state):  # cheap checks first
             out.append((key, state, msgs))
     return out
 

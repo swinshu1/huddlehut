@@ -100,6 +100,25 @@ def test_due_picks_idle_codex_threads_whose_agent_is_needed(env, tmp_path):
     assert [k for k, _, _ in wake_service.due(store, wake_service.codex_threads(), busy={"idle", "older"})] == ["stopped"]
 
 
+def test_a_link_without_a_transcript_is_found_by_thread_id(env, monkeypatch, tmp_path):
+    """Links made before hooks recorded transcripts still get woken: Codex keeps each thread's transcript
+    at a path named by its thread id, which is the link's key."""
+    store, board, key = env
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    day = tmp_path / "codex" / "sessions" / "2026" / "11" / "17"
+    day.mkdir(parents=True)
+    tid = "01a1ec8c-8882-73e1-a200-44bb202e5f7e"
+    hook.save(tid, {"board": board.id, "me": "codex-af18"})                # an old link: no client, transcript
+    store.touch(board.id, "codex-af18")
+    store.post(key, "claude-code-aaaa", "@all come back", "note")
+    assert wake_service.due(store, wake_service.codex_threads()) == []      # can't tell if it's idle yet
+    t = transcript(day / f"rollout-2026-11-17T18-46-35-{tid}.jsonl", "task_started", "task_complete")
+    assert wake_service.transcript_of(tid, hook.load(tid)) == t
+    assert [k for k, _, _ in wake_service.due(store, wake_service.codex_threads())] == [tid]
+    transcript(day / f"rollout-2026-11-17T18-46-35-{tid}.jsonl", "task_complete", "task_started")
+    assert wake_service.due(store, wake_service.codex_threads()) == []      # mid-turn: leave it be
+
+
 def test_a_tick_queues_what_needs_the_agent_to_its_thread(env, monkeypatch, capsys, tmp_path):
     store, board, key = env
     calls = tmp_path / "calls.json"
