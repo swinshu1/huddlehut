@@ -642,8 +642,8 @@ class Store:
             own = [c["path"] for c in self.claims(board.id) if c["agent"] == author]
             if own:
                 text = strip_paths(text, lambda p: any(overlap(normalize(p, top), o) for o in own))
-        if len(text.strip(" .,;:")) < 3:
-            text = "working"  # the whole post was file names
+        if text.strip() != content.strip() and len(text.strip(" .,;:")) < 3:
+            text = "working"  # the whole post was file names (a short post like "42" or "ok" stays)
         return text, conflicts
 
     def get_message(self, message_id: int) -> Message:
