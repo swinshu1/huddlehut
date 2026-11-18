@@ -110,6 +110,10 @@ def short_id(agent: str) -> str:
     return tag if base and re.fullmatch(r"[0-9a-f]{4}", tag) else agent
 
 
+def _snip(text: str, n: int = 60) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
 def short_model(model: str | None) -> str:
     """claude-opus-5-5 -> opus 5.5, claude-sonnet-5-5 -> sonnet 5.5; others as given."""
     if not model:
@@ -756,10 +760,12 @@ class Store:
             (board_id, agent, time.time()),
         )
 
-    def end_session(self, board_id: str, agent: str, by: str = "user", reason: str | None = None) -> Message | None:
-        """End an agent's session on a board by hand (e.g. it died without a clean exit): mark it
-        left, free its files, unpin it, and tell the board. If it's still alive, it reappears when
-        it next acts."""
+    def end_session(self, board_id: str, agent: str, by: str = "user", reason: str | None = None,
+                    announce: bool = True) -> Message | None:
+        """The one way a session leaves a board, whoever notices it's over (the agent's SessionEnd hook,
+        its parent session for a finished subagent, the user, the stale-session sweep): mark it left,
+        free its files, unpin it, and tell the board. Unkept promises are always flagged; announce=False
+        skips the plain "its files are free" note. If it's still alive, it reappears when it next acts."""
         board = self.get_board(board_id)
         name = self.labels(board_id).get(agent) or short_id(agent)
         self.mark_left(board_id, agent)
@@ -770,9 +776,11 @@ class Store:
         promises = [m for m in self.open_items(board_id) if m.kind == "promise" and m.author == agent]
         why = reason or f"was ended by the {by}"
         if promises:
-            ids = ", ".join(f"#{m.id}" for m in promises[:3])
+            ids = ", ".join(f"#{m.id} ({_snip(m.content, 50)})" for m in promises[:3])
             return self.post_to(board, by, f"{name}'s session {why}. Unkept promise: {ids}. Pick it up or re-plan.",
                                 "blocker")
+        if not announce:
+            return None
         return self.post_to(board, by, f"{name}'s session {why}; its files are free.", "note")
 
     def end_stale_sessions(self, older_than: float | None = None) -> list[tuple[str, str]]:
