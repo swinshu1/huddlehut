@@ -84,6 +84,9 @@ def test_status_ownership_goes_to_inventory_not_text(store):
     assert m.content == "Refactor parser"
     assert {(c["agent"], c["path"]) for c in store.claims(board.id)} == {(ME, "src/parser/*"), (ME, "tests/test_parser.py")}
     assert store.post(key, ME, "own src/api.py", "status").content == "working"   # nothing but files
+    for short in ("42", "ok", "no"):                                              # short posts aren't file names
+        assert store.post(key, ME, short, "answer").content == short
+        assert store.post(key, ME, short, "note").content == short
 
 
 def test_status_naming_someone_elses_file_is_reported(store):
