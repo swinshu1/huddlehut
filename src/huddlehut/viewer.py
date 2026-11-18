@@ -17,6 +17,7 @@ from importlib import resources
 from urllib.parse import parse_qs, urlparse
 
 from .compact import presence_tag
+from .reach import reach
 from .mentions import names_agents
 from . import wake_service
 from .service import distill_in_background, sweep_stale_sessions
@@ -76,9 +77,10 @@ class Viewer:
             files: dict[str, list[dict]] = {}
             for c in s.claims(b.id):
                 files.setdefault(c["agent"], []).append({"path": c["path"], "locked": bool(c.get("locked"))})
+            reachable = reach(s, b.id) if b.status == "open" else {}
             agents = {a: {"name": names.get(a) or short_id(a), "model": short_model(p.get("model")),
                           "tag": presence_tag(p).strip(" ()"), "state": p["state"], "seen_at": p["seen_at"],
-                          "files": files.get(a, [])} for a, p in seen.items()}
+                          "files": files.get(a, []), "reach": reachable.get(a)} for a, p in seen.items()}
             # waiting on the user: sessions whose last reply asked them something, and open @user posts
             waiting = [{"author": a, "name": names.get(a) or short_id(a), "content": p["waiting"],
                         "at": p["waiting_at"], "source": "session"}

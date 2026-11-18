@@ -25,6 +25,7 @@ from .compact import join_board as _join
 from .claims import normalize
 from .compact import render_entries, render_files, render_progress, render_view
 from .mentions import addressable, mention_names, mentions, tags
+from .reach import unreachable_note
 from .service import DEFAULT_AGENT, distill_in_background, sweep_stale_distills, sweep_stale_sessions
 from .store import USER, BoardError, Store, tool_of
 
@@ -272,7 +273,8 @@ def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "") -> 
     except BoardError as e:
         return f"error: {e}"
     news = "\nNew:\n" + _flag_mentions(m.board_id, new, render_entries(store, new)) if new else ""
-    return pre + f"ok #{m.id}" + _held_note(m) + _unknown_mentions(m.board_id, content) + news + S.nudge(m.board_id)
+    return (pre + f"ok #{m.id}" + _held_note(m) + _unknown_mentions(m.board_id, content)
+            + unreachable_note(store, m.board_id, content, AUTHOR) + news + S.nudge(m.board_id))
 
 
 @tool
