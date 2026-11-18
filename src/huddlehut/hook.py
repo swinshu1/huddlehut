@@ -48,11 +48,7 @@ SESSIONS = HOME / "sessions"
 MARKER = re.compile(r"\[(b_[0-9a-f]{8}) you=([\w.-]+)\]")
 SUBAGENT_DONE_TOOLS = re.compile(r"^collaboration.*(wait|close)")  # Codex: a parent waited on or closed a subagent
 KEY = re.compile(r"\bbrd_[\w-]{16,}")
-BOARD_TOOL = re.compile(r"^mcp__.*huddlehut.*__")
-# Codex "code mode": the model calls tools from inside a script (`await tools.mcp__huddlehut__join_board(...)`),
-# so the hook sees the script tool, and the board tool's result is in the script's output.
-CODE_TOOLS = {"exec"}
-BOARD_CALL_IN_CODE = re.compile(r"mcp__\w*huddlehut\w*__")
+BOARD_TOOL = re.compile(r"^mcp__.*huddlehut.*__")  # Codex reports calls made from code-mode scripts by this name too
 RISKY_GIT = re.compile(r"\bgit\b.*\b(commit|stash|reset|checkout|restore|clean)\b")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}  # Claude Code; Codex edits via apply_patch
 INTERVAL = float(os.environ.get("HUDDLEHUT_HOOK_INTERVAL", "5"))
@@ -406,9 +402,7 @@ def post_tool(inp: dict, client: str) -> dict | None:
     now = time.time()
     if client == "codex" and not parent and SUBAGENT_DONE_TOOLS.match(tool):
         end_subagents(sid)  # it waited on or closed its subagents: end the ones that finished
-    board_tool = bool(BOARD_TOOL.match(tool))
-    in_code = tool in CODE_TOOLS and bool(BOARD_CALL_IN_CODE.search(json.dumps(inp.get("tool_input"))))
-    if board_tool or in_code:
+    if BOARD_TOOL.match(tool):
         response = json.dumps(inp.get("tool_response"), ensure_ascii=False)
         m = MARKER.search(response)
         state = load(sid)
@@ -428,9 +422,7 @@ def post_tool(inp: dict, client: str) -> dict | None:
         if state:
             _seen(state, inp, client, now)
             save(sid, state)
-        if board_tool:
-            return None  # the board tool's own result already carried any new messages
-        # a script may do more than board calls (shell, commits): it goes through the usual checks too
+        return None  # the board tool's own result already carried any new messages
     state = load(sid)
     if not state:
         return None  # not on a board: no database access, no git
