@@ -197,3 +197,13 @@ def test_codex_code_mode_board_calls_link_the_session(env, monkeypatch, capsys):
     _, delivered, _ = run("post-tool", {"session_id": "T1", "tool_name": "exec", "tool_input": "text(1)",
                                         "tool_response": "1"}, monkeypatch, capsys, client="codex")
     assert "rebase on main" in delivered["hookSpecificOutput"]["additionalContext"]   # linked: news arrives
+
+
+def test_hook_trace_switch_file(env, monkeypatch, capsys):
+    hook.HOME.mkdir(parents=True, exist_ok=True)
+    run("post-tool", bash("S9"), monkeypatch, capsys)
+    assert not (hook.HOME / "hook-trace.jsonl").exists()
+    (hook.HOME / "hook-trace").touch()
+    run("post-tool", bash("S9"), monkeypatch, capsys, client="codex")
+    entry = json.loads((hook.HOME / "hook-trace.jsonl").read_text())
+    assert (entry["event"], entry["client"], entry["input"]["tool_name"]) == ("post-tool", "codex", "Bash")
