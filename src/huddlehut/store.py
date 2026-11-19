@@ -74,7 +74,8 @@ TICKET_TTL = 3600  # how long a wake ticket stays good
 # Codex app never restarts it), so a change that running sessions only get by restarting raises this:
 # servers record their level as they act, and the viewer flags agents on an older one.
 # 1: goal tool, entering a board on any tool use, wake tickets, reach notes, milestone reminders.
-SERVER_LEVEL = 1
+# 2: one agent per conversation: Codex names its thread on every call, and the Codex app shares one server.
+SERVER_LEVEL = 2
 SESSION_TIMEOUT = float(os.environ.get("HUDDLEHUT_SESSION_TIMEOUT_DAYS", "3")) * 86400  # then it's ended
 
 CUTE_NAMES = ("mochi", "pebble", "sprout", "biscuit", "dumpling", "noodle", "pickle", "waffle", "acorn", "button",
@@ -830,9 +831,19 @@ class Store:
                         " ON CONFLICT (client) DO NOTHING", (client, fresh, time.time()))
         return self._one("SELECT agent FROM identities WHERE client=?", (client,))["agent"]
 
-    def remember_identity(self, client: str, agent: str) -> None:
+    def remember_identity(self, client: str, agent: str) -> bool:
+        """Make `agent` this client session's identity, unless another session already is that agent: an
+        identity belongs to one conversation (two Codex threads must never become one agent)."""
+        if self.owner_of(agent) not in (None, client):
+            return False
         self.db.execute("INSERT INTO identities (client, agent, created_at) VALUES (?, ?, ?)"
                         " ON CONFLICT (client) DO UPDATE SET agent = excluded.agent", (client, agent, time.time()))
+        return True
+
+    def owner_of(self, agent: str) -> str | None:
+        """The client session that is this agent, if one is on record."""
+        row = self._one("SELECT client FROM identities WHERE agent = ? ORDER BY created_at DESC LIMIT 1", (agent,))
+        return row["client"] if row else None
 
     def issue_ticket(self, board_id: str, agent: str) -> str:
         """A one-time ticket that lets whoever presents it on this board become this agent. The wake
@@ -852,13 +863,15 @@ class Store:
         self.db.execute("DELETE FROM wake_tickets WHERE token = ?", (token,))
         return row["agent"] if row else None
 
-    def dormant_holder(self, board_id: str, nickname: str, tool: str) -> str | None:
+    def dormant_holder(self, board_id: str, nickname: str, tool: str, client: str | None = None) -> str | None:
         """The agent of the same tool that held this nickname here and has since gone idle or left: most
-        likely the same agent coming back after a restart. An active holder is someone else."""
+        likely the same agent coming back after a restart. An active holder is someone else, and so is
+        one that belongs to another client session."""
         cutoff = time.time() - IDLE_AFTER
         for agent, p in self.presence(board_id).items():
             if (p.get("nickname") == nickname.strip().lower() and tool_of(agent) == tool
-                    and (p["state"] == "left" or p["seen_at"] < cutoff)):
+                    and (p["state"] == "left" or p["seen_at"] < cutoff)
+                    and self.owner_of(agent) in (None, client)):
                 return agent
         return None
 
