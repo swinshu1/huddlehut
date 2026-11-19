@@ -1,7 +1,9 @@
 """MCP server exposing message boards to any MCP client (Claude Code, Codex, ...).
 
-Each client session spawns its own stdio process; they all share one SQLite file,
-so a message posted from a Codex session is visible to a Claude Code session immediately.
+Clients start the server over stdio; every server shares one database, so a message posted from a Codex
+session is visible to a Claude Code session immediately. A server process may serve one conversation
+(Claude Code starts one per session) or many (the Codex app runs one for all its threads and names the
+thread on every call), so identity and the current board live in a Conversation, not in the process.
 
 Token budget: every result lands in the agent's context and is re-read on later turns, and every
 tool call is itself a full agent turn. So:
@@ -17,9 +19,11 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import threading
 import time
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.context import Context
 
 from .compact import join_board as _join
 from .claims import normalize
@@ -55,69 +59,59 @@ Done: close_board(outcome)."""
 mcp = MCPServer("huddlehut", instructions=INSTRUCTIONS)
 store = Store()
 # Env vars that name the client session, steadiest first. Claude Code passes its session ids to the
-# servers it starts; Codex passes none, so Codex agents get their identity back by nickname instead.
+# servers it starts (one per session); Codex names its thread on each call instead (see conversation()).
 CLIENT_VARS = ("HUDDLEHUT_SESSION", "CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
+# One board call at a time: a shared server answers several conversations at once (sync tools run in
+# worker threads), and they share one database connection. Calls take milliseconds.
+LOCK = threading.RLock()
+tool = mcp.tool(structured_output=False)  # plain text only: no output schema, no duplicate JSON result
+HOOK_GRACE = float(os.environ.get("HUDDLEHUT_HOOK_GRACE", "120"))  # seconds before "hooks off" nudge
 
 
-def _client() -> str | None:
-    """This server's client session, e.g. "claude-code:local_3fe7…", or None if the client doesn't say."""
+def _env_client() -> str | None:
+    """The client session this process was started for, e.g. "claude-code:local_3fe7…", if it says."""
     for var in CLIENT_VARS:
         if os.environ.get(var, "").strip():
             return f"{DEFAULT_AGENT}:{os.environ[var].strip()}"
     return None
 
 
-def _author() -> str:
-    """This agent's id. One server process per client session; the suffix tells two sessions of the same
-    tool apart. A session the database has seen before gets its old id back, so a restarted or resumed
-    session keeps its nickname, read position, files and promises."""
-    if os.environ.get("HUDDLEHUT_EXACT_NAME"):
-        return DEFAULT_AGENT
-    fresh = f"{DEFAULT_AGENT}-{secrets.token_hex(2)}"
-    return store.identity(CLIENT, fresh) if CLIENT else fresh
+class Conversation:
+    """One conversation with the board: a Claude Code session, a Codex thread or subagent, any client's
+    session. It owns the agent's identity and its current board. Keyed by the client's own name for the
+    conversation, an agent keeps its id (and so its nickname, read position, files and promises) across
+    server restarts, two conversations never share one, and a subagent never takes over its parent."""
 
-
-CLIENT = _client()
-AUTHOR = _author()
-tool = mcp.tool(structured_output=False)  # plain text only: no output schema, no duplicate JSON result
-
-
-HOOK_GRACE = float(os.environ.get("HUDDLEHUT_HOOK_GRACE", "120"))  # seconds before "hooks off" nudge
-def _unknown_mentions(board_id: str, content: str) -> str:
-    missing = sorted(tags(content) - addressable(store, board_id))
-    if not missing:
-        return ""
-    here = ", ".join(sorted({n for a, n in store.labels(board_id).items()
-                            if a != USER and (store.presence(board_id).get(a) or {}).get("state") != "left"}))
-    return f"\n{', '.join('@' + m for m in missing)} isn't on this board, so they won't see it. Huddlers here: {here or 'just you'}."
-
-
-def _flag_mentions(board_id: str, msgs, text: str) -> str:
-    """Prefix lines that mention this agent with "@you" so they stand out."""
-    names = mention_names(AUTHOR, set(store.presence(board_id)) | {m.author for m in msgs})
-    nick = store.nicknames(board_id).get(AUTHOR)
-    if nick:
-        names.add(nick)
-    lines = text.split("\n")
-    return "\n".join("@you " + ln if mentions(m.content, names) else ln for ln, m in zip(lines, msgs)) \
-        if len(lines) == len(msgs) else text
-
-
-class Session:
-    """Per-process state: the active board. The read cursor lives in the database, keyed by this
-    session's agent name, so the session's hooks see and advance the same cursor."""
-
-    def __init__(self) -> None:
+    def __init__(self, client: str | None) -> None:
+        self.client = client
+        self.model = ""  # the model, when the client says on each call (Codex does)
         self.key: str | None = None
         self.joined: dict[str, float] = {}
         self.nudged: set[str] = set()
+        if os.environ.get("HUDDLEHUT_EXACT_NAME") and client == _env_client():
+            self.author = DEFAULT_AGENT
+        else:
+            fresh = f"{DEFAULT_AGENT}-{secrets.token_hex(2)}"
+            self.author = store.identity(client, fresh) if client else fresh
+
+    def become(self, agent: str) -> bool:
+        """Take over an earlier identity of this agent (its server restarted and lost it), unless that
+        identity belongs to another conversation."""
+        if self.client and not store.remember_identity(self.client, agent):
+            return False
+        self.author = agent
+        return True
+
+    def marker(self, board_id: str) -> str:
+        """Hooks read it from a board tool's result to link the client session to the board."""
+        return f"[{board_id} you={self.author}]"
 
     def nudge(self, board_id: str) -> str:
-        """Once per board: if this session's hooks never ran (presence has no working folder after a
+        """Once per board: if this conversation's hooks never ran (presence has no working folder after a
         grace period), nothing delivers board news to it between tool calls; say so."""
         if board_id in self.nudged or time.time() - self.joined.get(board_id, time.time()) < HOOK_GRACE:
             return ""
-        if (store.presence(board_id).get(AUTHOR) or {}).get("cwd"):
+        if (store.presence(board_id).get(self.author) or {}).get("cwd"):
             self.nudged.add(board_id)  # hooks are running; never nudge
             return ""
         self.nudged.add(board_id)
@@ -130,26 +124,79 @@ class Session:
             raise BoardError("no board. join_board(key, nickname) or create_board first; rejoining keeps your name")
         self.key = key
         try:
-            store.touch(store.board_for_key(key).id, AUTHOR, level=SERVER_LEVEL)  # active, on this code
+            store.touch(store.board_for_key(key).id, self.author, level=SERVER_LEVEL)  # active, on this code
         except BoardError:
             pass
         return key
 
     def inbox(self, key: str) -> tuple[list, int, str]:
-        """Others' messages since this session (or its hooks) last looked; advances the cursor."""
+        """Others' messages since this agent (or its hooks) last looked; advances the cursor."""
         board = store.board_for_key(key)
-        cursor = store.get_cursor(board.id, AUTHOR)
+        cursor = store.get_cursor(board.id, self.author)
         if cursor is None:
             # Never joined: don't dump the whole history into a post result; join_board gives the
             # compact view instead.
             cursor = store.max_message_id(board.id)
-            store.set_cursor(board.id, AUTHOR, cursor)
+            store.set_cursor(board.id, self.author, cursor)
             return [], cursor, board.status
-        new = store.unread(board.id, AUTHOR)
+        new = store.unread(board.id, self.author)
         if new:
             cursor = new[-1].id
-            store.set_cursor(board.id, AUTHOR, cursor)
+            store.set_cursor(board.id, self.author, cursor)
         return new, cursor, board.status
+
+
+_process: Conversation | None = None
+_threads: dict[str, Conversation] = {}
+
+
+def _call_meta(ctx: Context | None) -> dict:
+    try:
+        meta = ctx.request_context.meta if ctx is not None else None
+    except (AttributeError, ValueError):
+        return {}
+    if not meta:
+        return {}
+    return meta.model_dump(by_alias=True) if hasattr(meta, "model_dump") else dict(meta)
+
+
+def conversation(ctx: Context | None = None) -> Conversation:
+    """The conversation a tool call belongs to. Codex names its thread on every call (_meta threadId, and
+    x-codex-turn-metadata with thread_id and model); a client that names none (Claude Code, which starts a
+    server per session and names it in env vars) is this process's one conversation."""
+    global _process
+    meta = _call_meta(ctx)
+    turn = meta.get("x-codex-turn-metadata") or {}
+    thread = meta.get("threadId") or turn.get("thread_id")
+    if not thread:
+        if _process is None:
+            _process = Conversation(_env_client())
+        return _process
+    c = _threads.get(thread)
+    if c is None:
+        c = _threads[thread] = Conversation(f"{DEFAULT_AGENT}:{thread}")
+    c.model = turn.get("model") or c.model
+    return c
+
+
+def _unknown_mentions(board_id: str, content: str) -> str:
+    missing = sorted(tags(content) - addressable(store, board_id))
+    if not missing:
+        return ""
+    here = ", ".join(sorted({n for a, n in store.labels(board_id).items()
+                            if a != USER and (store.presence(board_id).get(a) or {}).get("state") != "left"}))
+    return f"\n{', '.join('@' + m for m in missing)} isn't on this board, so they won't see it. Huddlers here: {here or 'just you'}."
+
+
+def _flag_mentions(c: Conversation, board_id: str, msgs, text: str) -> str:
+    """Prefix lines that mention this agent with "@you" so they stand out."""
+    names = mention_names(c.author, set(store.presence(board_id)) | {m.author for m in msgs})
+    nick = store.nicknames(board_id).get(c.author)
+    if nick:
+        names.add(nick)
+    lines = text.split("\n")
+    return "\n".join("@you " + ln if mentions(m.content, names) else ln for ln, m in zip(lines, msgs)) \
+        if len(lines) == len(msgs) else text
 
 
 def _milestone_note(m) -> str:
@@ -171,38 +218,28 @@ def _held_note(m) -> str:
     return "".join(f"\nnot claimed: {p} held by {names.get(c['agent'], c['agent'])}. Ask them first." for p, c in held)
 
 
-def _become(agent: str) -> None:
-    """Take over an earlier identity of this agent (the server restarted and lost it)."""
-    global AUTHOR
-    AUTHOR = agent
-    if CLIENT:
-        store.remember_identity(CLIENT, agent)
-
-
-def _identity(board_id: str, nickname: str, model: str, ticket: str = "") -> str:
+def _identity(c: Conversation, board_id: str, nickname: str, model: str, ticket: str = "") -> str:
     """Give this agent its name on the board and tell it who it is here. A name it had here before wins
-    over a new one: others already know it by that name. A wake ticket (from the wake service's message)
-    makes this session the agent it was issued for, even if that agent was active moments ago."""
+    over a new one: others already know it by that name. A wake ticket makes this conversation the agent
+    it was issued for, even if that agent was active moments ago, unless another conversation is it."""
     note = ""
     holder = store.redeem_ticket(ticket.strip(), board_id) if ticket.strip() else None
-    if holder and holder != AUTHOR:
-        _become(holder)
+    if holder and holder != c.author and c.become(holder):
         note = " (your name from before; your read position, files and promises carried over)"
-    current = store.nicknames(board_id).get(AUTHOR)
+    current = store.nicknames(board_id).get(c.author)
     if not current and nickname.strip():
-        earlier = store.dormant_holder(board_id, nickname, tool_of(AUTHOR))
-        if earlier and earlier != AUTHOR:
-            _become(earlier)
-            current = store.nicknames(board_id).get(AUTHOR)
+        earlier = store.dormant_holder(board_id, nickname, tool_of(c.author), c.client)
+        if earlier and earlier != c.author and c.become(earlier):
+            current = store.nicknames(board_id).get(c.author)
             note = " (your name from before; your read position, files and promises carried over)"
-    if model:
-        store.set_model(board_id, AUTHOR, model)
+    if c.model or model:
+        store.set_model(board_id, c.author, c.model or model)  # what the client says beats what the agent says
     if current:
-        store.touch(board_id, AUTHOR, level=SERVER_LEVEL)
+        store.touch(board_id, c.author, level=SERVER_LEVEL)
         if not note and nickname.strip() and nickname.strip().lower() != current:
             note = " (your name from before; keep it)"
         return f"You're {current} here{note}."
-    nick, why = store.set_nickname(board_id, AUTHOR, nickname or None)
+    nick, why = store.set_nickname(board_id, c.author, nickname or None)
     if why:
         note = f" ({why}; you got this one)"
     elif not nickname.strip():
@@ -210,129 +247,136 @@ def _identity(board_id: str, nickname: str, model: str, ticket: str = "") -> str
     return f"You're {nick} here{note}."
 
 
-def _marker(board_id: str) -> str:
-    """Hooks read it from a board tool's result to link the client session to the board."""
-    return f"[{board_id} you={AUTHOR}]"
+def _enter(c: Conversation, board_id: str, nickname: str = "", model: str = "", ticket: str = "") -> str:
+    """Make this agent a huddler on the board for this conversation: its name (an existing one wins),
+    presence, and the marker line that links the client session's hooks. Every way onto a board goes
+    through here, so no agent ends up unnamed or unlinked. Returns the marker and "You're X here"."""
+    me = _identity(c, board_id, nickname, model, ticket)  # first: it may switch to the agent's old identity
+    c.joined.setdefault(board_id, time.time())
+    return f"{c.marker(board_id)}\n{me}"
 
 
-def _enter(board_id: str, nickname: str = "", model: str = "", ticket: str = "") -> str:
-    """Make this agent a huddler on the board for the life of this process: its name (an existing one
-    wins), presence, and the marker line that links the client session's hooks. Every way onto a board
-    goes through here, so no agent ends up unnamed or unlinked. Returns the marker and "You're X here"."""
-    me = _identity(board_id, nickname, model, ticket)  # first: it may switch this session to its old identity
-    S.joined.setdefault(board_id, time.time())
-    return f"{_marker(board_id)}\n{me}"
-
-
-def _board(key: str, view: bool = True):
-    """The board a tool acts on: the given key, else this session's current one. The first use of a
-    board in this process enters it like join_board does (an agent that kept the key across a restart
+def _board(c: Conversation, key: str, view: bool = True):
+    """The board a tool acts on: the given key, else this conversation's current one. The first use of a
+    board in a conversation enters it like join_board does (an agent that kept the key across a restart
     may skip join_board), and with view=True shows it, reading on from there. Returns (key, board, preamble)."""
-    k = S.use(key)
+    k = c.use(key)
     board = store.board_for_key(k)
-    if board.id in S.joined or board.status != "open":
+    if board.id in c.joined or board.status != "open":
         return k, board, ""
-    head = _enter(board.id)
+    head = _enter(c, board.id)
     if not view:
         return k, board, head + "\n"
     text, last_id = render_view(store, board)  # the plain view: a tool call never waits on summarizing
-    store.set_cursor(board.id, AUTHOR, last_id)
+    store.set_cursor(board.id, c.author, last_id)
     return k, board, f"{head} You're on the board now (no need to join_board).\n{text}\n---\n"
 
 
-S = Session()
-
-
 @tool
-def create_board(name: str, project: str, nickname: str, goal: str = "", model: str = "") -> str:
+def create_board(name: str, project: str, nickname: str, goal: str = "", model: str = "",
+                 ctx: Context | None = None) -> str:
     """Spin up board. project: repo name. nickname: cute one-word name for yourself. model: your model id."""
-    existing = [b for b in store.list_boards(project) if b.name != name]
-    board, key = store.create_board(name, project, AUTHOR, goal)
-    S.use(key)
-    store.set_cursor(board.id, AUTHOR, 0)
-    out = f"{_enter(board.id, nickname, model)}\nCreated. Key: {key}\nGive user key for other sessions. Not recoverable."
+    with LOCK:
+        c = conversation(ctx)
+        existing = [b for b in store.list_boards(project) if b.name != name]
+        board, key = store.create_board(name, project, c.author, goal)
+        c.use(key)
+        store.set_cursor(board.id, c.author, 0)
+        out = f"{_enter(c, board.id, nickname, model)}\nCreated. Key: {key}\nGive user key for other sessions. Not recoverable."
     if existing:
         out += f"\nOther open boards {project}: " + ", ".join(f"{b.name} ({b.id})" for b in existing[:5])
     return out
 
 
 @tool
-async def join_board(key: str, nickname: str, model: str = "", status: str = "", ticket: str = "") -> str:
-    """Join by key. nickname: cute one-word name for yourself (your old one if you were here before). model: your model id. status: what you'll do. ticket: from a wake message, if any.
+async def join_board(key: str, nickname: str, model: str = "", status: str = "", ticket: str = "",
+                     ctx: Context | None = None) -> str:
+    """Join by key. nickname: cute one-word name for yourself (your old one if you were here before). model: your model id. status: what you'll do. ticket: from a board hint, if any.
     Returns who does what, open questions, decision log."""
     try:
-        board_id = store.board_for_key(key.strip()).id
-        sweep_stale_sessions(store)
-        head = _enter(board_id, nickname, model, ticket)
-        S.use(key)
-        note = ""
-        if status:
-            note = _held_note(store.post(key, AUTHOR, status, kind="status"))
-        text, last_id = await asyncio.to_thread(_join, store.url, key)
-        store.set_cursor(board_id, AUTHOR, last_id)
+        with LOCK:
+            c = conversation(ctx)
+            board_id = store.board_for_key(key.strip()).id
+            sweep_stale_sessions(store)
+            head = _enter(c, board_id, nickname, model, ticket)
+            c.use(key)
+            note = ""
+            if status:
+                note = _held_note(store.post(key, c.author, status, kind="status"))
+        text, last_id = await asyncio.to_thread(_join, store.url, key)  # its own connection; may summarize
+        with LOCK:
+            store.set_cursor(board_id, c.author, last_id)
         return f"{head}\n{text}{note}"
     except BoardError as e:
         return f"error: {e}"
 
 
 @tool
-def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "") -> str:
+def post(content: str, kind: str = "note", reply_to: int = 0, key: str = "", ctx: Context | None = None) -> str:
     """kind: status|decision|question|answer|blocker|promise|result|deadend|note. reply_to: id answered/kept. Returns others' new msgs."""
-    try:
-        k, _, pre = _board(key)
-        m = store.post(k, AUTHOR, content, kind, reply_to or None)
-        new, _, _ = S.inbox(k)
-    except BoardError as e:
-        return f"error: {e}"
-    news = "\nNew:\n" + _flag_mentions(m.board_id, new, render_entries(store, new)) if new else ""
-    return (pre + f"ok #{m.id}" + _held_note(m) + _milestone_note(m) + _unknown_mentions(m.board_id, content)
-            + unreachable_note(store, m.board_id, content, AUTHOR) + news + S.nudge(m.board_id))
+    with LOCK:
+        c = conversation(ctx)
+        try:
+            k, _, pre = _board(c, key)
+            m = store.post(k, c.author, content, kind, reply_to or None)
+            new, _, _ = c.inbox(k)
+        except BoardError as e:
+            return f"error: {e}"
+        news = "\nNew:\n" + _flag_mentions(c, m.board_id, new, render_entries(store, new)) if new else ""
+        return (pre + f"ok #{m.id}" + _held_note(m) + _milestone_note(m) + _unknown_mentions(m.board_id, content)
+                + unreachable_note(store, m.board_id, content, c.author) + news + c.nudge(m.board_id))
 
 
 @tool
 def files(claim: list[str] | None = None, lock: list[str] | None = None, unlock: list[str] | None = None,
-          release: list[str] | None = None, key: str = "") -> str:
+          release: list[str] | None = None, key: str = "", ctx: Context | None = None) -> str:
     """Shared file inventory. claim: files/globs you're starting on. lock: claim + block others' edits (lapses if you go idle or leave). unlock: keep claim, drop lock. release: done ("*" = all). Returns who holds what."""
-    try:
-        _, board, pre = _board(key, view=False)
-        top = (store.presence(board.id).get(AUTHOR) or {}).get("toplevel")
+    with LOCK:
+        c = conversation(ctx)
+        try:
+            _, board, pre = _board(c, key, view=False)
+            top = (store.presence(board.id).get(c.author) or {}).get("toplevel")
 
-        def norm(paths):
-            return ["*"] if "*" in paths else [normalize(p, top) for p in paths]
+            def norm(paths):
+                return ["*"] if "*" in paths else [normalize(p, top) for p in paths]
 
-        lines = []
-        if unlock:
-            store.unlock(board.id, AUTHOR, norm(unlock))
-        if release:
-            store.release(board.id, AUTHOR, norm(release))
-        for paths, locking in ((claim, False), (lock, True)):
-            for path, c in store.claim(board.id, AUTHOR, norm(paths), top, lock=locking) if paths else []:
-                holder = store.labels(board.id).get(c["agent"], c["agent"])
-                lines.append(f"not {'locked' if locking else 'claimed'}: {path} held by {holder}. Ask them first.")
-    except BoardError as e:
-        return f"error: {e}"
-    return pre + "\n".join(lines + [render_files(store, board.id) or "(no files claimed)"])
+            lines = []
+            if unlock:
+                store.unlock(board.id, c.author, norm(unlock))
+            if release:
+                store.release(board.id, c.author, norm(release))
+            for paths, locking in ((claim, False), (lock, True)):
+                for path, held in store.claim(board.id, c.author, norm(paths), top, lock=locking) if paths else []:
+                    holder = store.labels(board.id).get(held["agent"], held["agent"])
+                    lines.append(f"not {'locked' if locking else 'claimed'}: {path} held by {holder}. Ask them first.")
+        except BoardError as e:
+            return f"error: {e}"
+        return pre + "\n".join(lines + [render_files(store, board.id) or "(no files claimed)"])
 
 
 @tool
-async def read_messages(wait_seconds: int = 0, since_id: int = -1, key: str = "") -> str:
+async def read_messages(wait_seconds: int = 0, since_id: int = -1, key: str = "", ctx: Context | None = None) -> str:
     """Others' new msgs. wait_seconds<=50 blocks for one. since_id: reread from id."""
     try:
-        k, _, pre = _board(key)
-        if since_id >= 0:
-            store.set_cursor(store.board_for_key(k).id, AUTHOR, since_id, rewind=True)
+        with LOCK:
+            c = conversation(ctx)
+            k, _, pre = _board(c, key)
+            if since_id >= 0:
+                store.set_cursor(store.board_for_key(k).id, c.author, since_id, rewind=True)
         deadline = time.monotonic() + min(max(wait_seconds, 0), 50)
         while True:
-            new, last, status = S.inbox(k)
+            with LOCK:  # not across the wait: other conversations keep going meanwhile
+                new, last, status = c.inbox(k)
             if new or status != "open" or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(1.0)
+        with LOCK:
+            tail = "" if status == "open" else f" (board {status})"
+            board_id = store.board_for_key(k).id
+            body = _flag_mentions(c, board_id, new, render_entries(store, new)) if new else "(nothing new)"
+            return pre + body + f"\nlast_id={last}{tail}" + c.nudge(board_id)
     except BoardError as e:
         return f"error: {e}"
-    tail = "" if status == "open" else f" (board {status})"
-    board_id = store.board_for_key(k).id
-    body = _flag_mentions(board_id, new, render_entries(store, new)) if new else "(nothing new)"
-    return pre + body + f"\nlast_id={last}{tail}" + S.nudge(board_id)
 
 
 def _milestone_id(x) -> int:
@@ -344,27 +388,32 @@ def _milestone_id(x) -> int:
 
 @tool
 def goal(done: list[int | str] | None = None, undo: list[int | str] | None = None, add: list[str] | None = None,
-         key: str = "") -> str:
+         key: str = "", ctx: Context | None = None) -> str:
     """Board's shared goal + milestones. done: milestone ids you finished. undo: reopen. add: new milestones. Returns progress."""
+    with LOCK:
+        return _goal(conversation(ctx), done, undo, add, key)
+
+
+def _goal(c: Conversation, done, undo, add, key: str) -> str:
     try:
-        k, board, pre = _board(key, view=False)
+        k, board, pre = _board(c, key, view=False)
         finished, reopened = [], []
         for x in done or []:
             m = store._milestone(board.id, _milestone_id(x))
             if not m["done_at"]:
-                finished.append(store.set_milestone_done(board.id, m["id"], AUTHOR)["text"])
+                finished.append(store.set_milestone_done(board.id, m["id"], c.author)["text"])
         for x in undo or []:
             m = store._milestone(board.id, _milestone_id(x))
             if m["done_at"]:
-                reopened.append(store.set_milestone_done(board.id, m["id"], AUTHOR, done=False)["text"])
-        added = [store.add_milestone(board.id, t, AUTHOR)["text"] for t in add or [] if t.strip()]
+                reopened.append(store.set_milestone_done(board.id, m["id"], c.author, done=False)["text"])
+        added = [store.add_milestone(board.id, t, c.author)["text"] for t in add or [] if t.strip()]
         # the stream shows progress too, so others (and the user) see it without asking
         if finished:
-            store.post(k, AUTHOR, "milestone done: " + "; ".join(finished), kind="result")
+            store.post(k, c.author, "milestone done: " + "; ".join(finished), kind="result")
         if reopened:
-            store.post(k, AUTHOR, "milestone reopened: " + "; ".join(reopened), kind="note")
+            store.post(k, c.author, "milestone reopened: " + "; ".join(reopened), kind="note")
         if added:
-            store.post(k, AUTHOR, "milestone added: " + "; ".join(added), kind="note")
+            store.post(k, c.author, "milestone added: " + "; ".join(added), kind="note")
         board = store.get_board(board.id)
     except BoardError as e:
         return f"error: {e}"
@@ -373,13 +422,15 @@ def goal(done: list[int | str] | None = None, undo: list[int | str] | None = Non
 
 
 @tool
-def close_board(outcome: str = "", key: str = "") -> str:
+def close_board(outcome: str = "", key: str = "", ctx: Context | None = None) -> str:
     """Spin down when done. Saves lessons to memory. outcome: what worked/failed."""
     try:
-        k, _, _ = _board(key, view=False)
-        if outcome:
-            store.post(k, AUTHOR, outcome, kind="result")
-        board = store.close_board(k, AUTHOR, outcome)
+        with LOCK:
+            c = conversation(ctx)
+            k, _, _ = _board(c, key, view=False)
+            if outcome:
+                store.post(k, c.author, outcome, kind="result")
+            board = store.close_board(k, c.author, outcome)
     except BoardError as e:
         return f"error: {e}"
     distill_in_background(store.url, board.id)
@@ -387,10 +438,12 @@ def close_board(outcome: str = "", key: str = "") -> str:
 
 
 @tool
-def reopen_board(key: str = "") -> str:
+def reopen_board(key: str = "", ctx: Context | None = None) -> str:
     """Spin closed board back up."""
     try:
-        store.reopen_board(S.use(key), AUTHOR)
+        with LOCK:
+            c = conversation(ctx)
+            store.reopen_board(c.use(key), c.author)
     except BoardError as e:
         return f"error: {e}"
     return "Reopened."
@@ -399,7 +452,8 @@ def reopen_board(key: str = "") -> str:
 @tool
 def search_memories(query: str, project: str = "", limit: int = 3) -> str:
     """Lessons from past boards."""
-    hits = store.search_memories(query, project or None, limit)
+    with LOCK:
+        hits = store.search_memories(query, project or None, limit)
     if not hits:
         return "(no lessons)"
     return "\n".join(f"- {h['title']}: {h['technique']} (when: {h['when_to_apply']})" for h in hits)
