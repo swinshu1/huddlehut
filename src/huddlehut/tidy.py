@@ -23,9 +23,23 @@ _LINT = re.compile(
 )
 
 
+_CODE = re.compile(r"(`+)(?:(?!\1).)+?\1", re.S)  # `inline code` and ```blocks```: never rewritten
+
+
 def tidy(text: str) -> str:
     if _FAILURE.search(text):
         return text
+    # tidy only the prose between code spans: commands and snippets must arrive byte for byte
+    parts, last = [], 0
+    for m in _CODE.finditer(text):
+        parts += [_tidy_prose(text[last:m.start()]), m.group(0)]
+        last = m.end()
+    parts.append(_tidy_prose(text[last:]))
+    out = "".join(parts).strip()
+    return out or text
+
+
+def _tidy_prose(text: str) -> str:
     out = _TESTS.sub("tests pass", text)
     has_tests = "tests pass" in out
     # lint success next to passing tests adds nothing; on its own, keep it short
@@ -34,6 +48,6 @@ def tidy(text: str) -> str:
         out = re.sub(r"\s*[,;+&]?\s*(?:and\s+)?\x00", "", out)
         out = out.replace("\x00", "")
     out = re.sub(r"(tests pass)(?:\s*[,;]\s*tests pass)+", r"\1", out)  # "12 pass, all tests pass"
-    out = re.sub(r"\s{2,}", " ", out).strip()
-    out = re.sub(r"\(\s*\)", "", out).strip()
-    return out or text
+    if out != text:  # only parentheses this emptied, e.g. "(474 passed in 3s)"; never a written "()"
+        out = re.sub(r"\(\s*\)", "", out)
+    return re.sub(r"\s{2,}", " ", out)

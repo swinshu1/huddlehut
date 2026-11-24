@@ -148,12 +148,15 @@ section h2 { font-size: 12.5px; font-weight: 500; color: var(--muted); margin-bo
 .roster .sub { font-size: 12px; color: var(--muted); }
 .roster .reach { font-size: 12px; color: var(--attn); margin-left: 4px; cursor: help; }
 .roster .reach.old { color: var(--muted); }
+.roster .away { font: inherit; font-size: 12.5px; color: var(--muted); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; }
 .waiting { list-style: none; margin: 32px 0 0; padding: 0; }
 .waiting li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; gap: 14px; padding: 12px 14px;
   margin-bottom: 8px; border-radius: 12px; background: color-mix(in srgb, var(--attn) 10%, transparent); }
 .waiting .label { font-size: 12.5px; color: var(--attn); padding: 0; margin: 0 0 2px; }  /* not the sidebar .label */
 .waiting .who { align-self: start; justify-self: start; }
 .waiting time { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.waiting .answer { display: flex; gap: 8px; margin-top: 8px; }
+.waiting .answer input { flex: 1; min-width: 0; }
 .stream { margin-top: 32px; }
 .dot::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--attn); margin-right: 6px; vertical-align: 2px; }
 .log { list-style: none; margin: 0; padding: 0; }
@@ -258,6 +261,8 @@ let pending = null, outcomeDraft = "", actionError = "", working = false;  // in
 let errAt = "panel", goalDraft = null, msDraft = "", cur = null;  // goal editing; cur = the board on screen
 let me = "user", meDraft = null, meError = "";  // your name, shown instead of "user"
 let sayDraft = "";  // the message box under the huddlers
+const replyDrafts = {};
+let showAway = false;  // idle and departed agents stay out of the huddlers list unless asked for  // post id -> your unsent answer to that ask
 const open = new Set();
 
 function long(text, key) {
@@ -343,7 +348,10 @@ function board(d) {
   const order = a => a.state === "left" ? 2 : a.tag ? 1 : 0;   // active, then idle, then left
   const agents = Object.entries(d.agents).sort(([, x], [, y]) => order(x) - order(y) || y.seen_at - x.seen_at);
   const here = agents.filter(([, a]) => order(a) === 0).length;
-  const roster = agents.map(([id, a]) => {
+  const idle = agents.filter(([, a]) => order(a) === 1).length, gone = agents.length - here - idle;
+  const away = [idle && `${idle} idle`, gone && `${gone} left`].filter(Boolean).join(", ");
+  const shown = showAway ? agents : agents.filter(([, a]) => order(a) === 0);  // huddlers = who's here now
+  const roster = shown.map(([id, a]) => {
     const files = a.files.map(f => f.path + (f.locked ? " (locked)" : "")).join("\n");
     const sub = [a.model, a.tag].filter(Boolean).join(", ");
     const r = a.reach || {};
@@ -361,7 +369,9 @@ function board(d) {
   }).join("");
   const logo = document.querySelector(".brand svg").outerHTML;
   const waiting = d.waiting.length ? `<ul class="waiting">${d.waiting.map(w => `<li>${who(w.author, w.name)}
-      <div><div class="label">${w.source === "session" ? "waiting on you" : "asks you"}</div>${long(w.content, "w" + w.author + (w.id || ""))}</div>
+      <div><div class="label">${w.source === "session" ? "waiting on you" : "asks you"}</div>${long(w.content, "w" + w.author + (w.id || ""))}${
+        w.source === "board" && w.id && b.status === "open" ? `<div class="answer"><input id="reply-${w.id}" data-reply-input="${w.id}" value="${esc(replyDrafts[w.id] || "")}" maxlength="1000" autocomplete="off"
+          placeholder="answer ${esc(w.name)}" aria-label="answer ${esc(w.name)}"><button class="btn primary" data-reply="${w.id}"${working ? " disabled" : ""}>answer</button><button class="btn" data-done="${w.id}" title="already answered elsewhere or no longer needed: stop showing it"${working ? " disabled" : ""}>mark answered</button></div>` : ""}</div>
       <time>${w.at ? clock(w.at) : ""}</time></li>`).join("")}</ul>` : "";
   const older = d.message_count > d.stream.length ? `<p class="dim">${d.message_count - d.stream.length} older messages not shown.</p>` : "";
   const lessons = d.lessons ? `<p class="dim"><a href="#/memory">${d.lessons} lesson${d.lessons === 1 ? "" : "s"} saved from this board</a></p>` : "";
@@ -385,7 +395,8 @@ function board(d) {
   return `${close}<h1 class="title">${esc(b.name)}</h1>
     <div class="meta">${esc(b.project)}, ${b.status === "open" ? "open" : "closed"} since ${day(b.status === "open" ? b.created_at : b.closed_at || b.created_at)}</div>
     ${goalBox(d)}${outcome}${closePanel}
-    ${roster ? `<div class="huddlers"><div class="huddlers-label">${logo}huddlers<span class="count">${here} here now</span>${pingAll}</div><div class="roster">${roster}</div></div>` : ""}${endPanel}
+    ${agents.length ? `<div class="huddlers"><div class="huddlers-label">${logo}huddlers<span class="count">${here} here now</span>${pingAll}</div><div class="roster">${roster || '<span class="sub">nobody active right now</span>'}${
+      away ? `<button class="away" id="toggle-away" aria-expanded="${showAway}">${showAway ? "hide " + esc(away) : esc(away)}</button>` : ""}</div></div>` : ""}${endPanel}
     ${waiting}${composer}
     <div class="stream">${stream}${older}${lessons}</div>`;
 }
@@ -428,7 +439,7 @@ async function render(force = false) {
   }
   side(r);
   if (!force && html === last) return;
-  const focused = document.activeElement && ["q", "outcome", "goal-input", "ms-input", "say"].includes(document.activeElement.id) ? document.activeElement.id : null;
+  const focused = document.activeElement && (["q", "outcome", "goal-input", "ms-input", "say"].includes(document.activeElement.id) || /^reply-\d+$/.test(document.activeElement.id)) ? document.activeElement.id : null;
   const caret = focused ? document.activeElement.selectionStart : 0;
   last = html;
   $("#main").innerHTML = html;
@@ -459,6 +470,8 @@ async function act(url, body, onOk, where = "panel") {
 }
 const closeBoard = () => act(`/api/boards/${route().board}/close`, {outcome: outcomeDraft});
 const endSession = () => act(`/api/boards/${route().board}/agents/${encodeURIComponent(pending.agent)}/end`);
+const answer = (id, content) => content.trim() && act(`/api/boards/${route().board}/post`, {content, reply_to: Number(id)},
+                                                     () => { delete replyDrafts[id]; }, "say");
 const say = () => sayDraft.trim() && act(`/api/boards/${route().board}/post`, {content: sayDraft}, () => { sayDraft = ""; }, "say");
 async function pingTo(name) {  // put "@name " in the message box; Enter sends it, with or without a note
   const tag = "@" + name;
@@ -491,6 +504,11 @@ document.addEventListener("click", e => {
   if (e.target.id === "cancel") { pending = null; actionError = ""; render(true); return; }
   if (e.target.closest("#edit-me")) { editMe(); return; }
   if (e.target.id === "send") { say(); return; }
+  if (e.target.id === "toggle-away") { showAway = !showAway; render(true); return; }
+  const rp = e.target.closest("[data-reply]");
+  if (rp) { answer(rp.dataset.reply, replyDrafts[rp.dataset.reply] || ""); return; }
+  const dn = e.target.closest("[data-done]");
+  if (dn) { answer(dn.dataset.done, "marked answered"); return; }
   const pg = e.target.closest("[data-ping]");
   if (pg) { pingTo(pg.dataset.ping); return; }
   if (e.target.id === "edit-goal") { editGoal(); return; }
@@ -508,6 +526,10 @@ document.addEventListener("click", e => {
   if (m) { open.add(m.dataset.open); render(true); }
 });
 document.addEventListener("keydown", e => {
+  if (e.target.dataset && e.target.dataset.replyInput) {
+    if (e.key === "Enter") answer(e.target.dataset.replyInput, e.target.value);
+    return;
+  }
   if (e.target.id === "say") {
     if (e.key === "Enter") say();
     if (e.key === "Escape") { sayDraft = ""; e.target.value = ""; }
@@ -537,6 +559,7 @@ document.addEventListener("input", e => {
   if (e.target.id === "goal-input") { goalDraft = e.target.value; return; }
   if (e.target.id === "me-input") { meDraft = e.target.value; return; }
   if (e.target.id === "say") { sayDraft = e.target.value; return; }
+  if (e.target.dataset && e.target.dataset.replyInput) { replyDrafts[e.target.dataset.replyInput] = e.target.value; return; }
   if (e.target.id === "ms-input") { msDraft = e.target.value; return; }
   if (e.target.id !== "q") return;
   clearTimeout(window._t);

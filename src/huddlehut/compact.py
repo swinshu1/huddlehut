@@ -174,13 +174,17 @@ def render_view(store: Store, board: Board) -> tuple[str, int]:
     progress = render_progress(store, board.id)
     if progress:
         parts.append(progress)
-    here = [label(a) + presence_tag(p) for a, p in sorted(seen.items(), key=lambda kv: -kv[1]["seen_at"])
-            if p["state"] != "left"]
-    if here:
-        parts.append("Huddlers: " + ", ".join(here))
+    now = time.time()
+    staying = sorted(((a, p) for a, p in seen.items() if p["state"] != "left"), key=lambda kv: -kv[1]["seen_at"])
+    here = [label(a) for a, p in staying if now - p["seen_at"] <= IDLE_AFTER]  # who's here now
+    idle = len(staying) - len(here)
+    if here or idle:
+        parts.append("Huddlers: " + (", ".join(here) or "nobody active")
+                     + (f" (+{idle} idle; @name wakes one)" if idle else ""))
     user = store.user_name()
     if user != "user":
         parts.append(f"User: {user} (@{user} or @user)")
+    statuses = [m for m in statuses if (seen.get(m.author) or {}).get("state") != "left"]  # gone: not "now"
     if statuses:
         parts.append("Now:\n" + "\n".join(
             f"#{m.id} {label(m.author)}{presence_tag(seen.get(m.author))}: {m.content}" for m in statuses))

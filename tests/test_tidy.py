@@ -31,3 +31,17 @@ def test_posts_are_tidied(store):
     _, key = store.create_board("b", "p", "a")
     assert store.post(key, "a", "snapshot rebuilt. 474 pass, ruff+mypy clean", "result").content == \
         "snapshot rebuilt. tests pass"
+
+
+@pytest.mark.parametrize("raw", [
+    'run: `d(){ [ -d "$1" ]; }; d /home && echo OK`',          # shell function in a code span
+    "call foo() first, then bar( ) again",                      # written parentheses in prose
+    "```\nx  =  1\ny() { :; }\n```",                            # code block: spacing and () kept
+    "`pytest -q` gave `3 passed in 0.2s`",                      # numbers inside code are not trimmed
+])
+def test_code_and_written_parentheses_arrive_intact(raw):
+    assert tidy(raw) == raw
+
+
+def test_prose_is_still_tidied_around_code():
+    assert tidy("ran `make check` (474 passed in 3.1s) and ruff clean") == "ran `make check` (tests pass)"

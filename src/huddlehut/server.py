@@ -94,10 +94,13 @@ class Conversation:
             fresh = f"{DEFAULT_AGENT}-{secrets.token_hex(2)}"
             self.author = store.identity(client, fresh) if client else fresh
 
-    def become(self, agent: str) -> bool:
+    def become(self, agent: str, departed: bool = False) -> bool:
         """Take over an earlier identity of this agent (its server restarted and lost it), unless that
-        identity belongs to another conversation."""
-        if self.client and not store.remember_identity(self.client, agent):
+        identity belongs to another conversation. A departed identity (its session left) is handed over
+        whichever session held it."""
+        if self.client and departed:
+            store.take_identity(self.client, agent)
+        elif self.client and not store.remember_identity(self.client, agent):
             return False
         self.author = agent
         return True
@@ -229,7 +232,8 @@ def _identity(c: Conversation, board_id: str, nickname: str, model: str, ticket:
     current = store.nicknames(board_id).get(c.author)
     if not current and nickname.strip():
         earlier = store.dormant_holder(board_id, nickname, tool_of(c.author), c.client)
-        if earlier and earlier != c.author and c.become(earlier):
+        departed = bool(earlier) and (store.presence(board_id).get(earlier) or {}).get("state") == "left"
+        if earlier and earlier != c.author and c.become(earlier, departed):
             current = store.nicknames(board_id).get(c.author)
             note = " (your name from before; your read position, files and promises carried over)"
     if c.model or model:

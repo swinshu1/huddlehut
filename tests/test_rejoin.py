@@ -144,3 +144,69 @@ def test_wake_ticket_brings_back_an_identity_that_is_still_active(db_url):
             assert _marker_agent(again) != old and "'acorn' is taken" in again
 
     anyio.run(run)
+
+
+def test_departed_name_goes_to_the_next_session_that_asks_for_it(db_url):
+    """Each Codex thread (and each Claude Code session) is its own client. When the session holding a
+    name has left, a new session asking for that name becomes that agent: same name, read position,
+    files and promises. The old session, if it ever returns, is a new agent rather than a second copy."""
+
+    async def run():
+        async with stdio_client(_params(db_url, "codex", HUDDLEHUT_SESSION="thread-1")) as (r, w), \
+                   ClientSession(r, w) as first:
+            await first.initialize()
+            created = await _call(first, "create_board", name="b", project="p", nickname="acorn")
+            key = re.search(r"brd_\S+", created).group(0)
+            old = _marker_agent(created)
+            await _call(first, "post", content="post when seeds rebuilt", kind="promise")
+
+        store = Store(db_url)
+        board = store.board_for_key(key)
+        # only idle, not left: its own thread may still wake, so another thread doesn't get it
+        store.db.execute("UPDATE presence SET seen_at=? WHERE agent=?", (time.time() - IDLE_AFTER - 5, old))
+        async with stdio_client(_params(db_url, "codex", HUDDLEHUT_SESSION="thread-2")) as (r, w), \
+                   ClientSession(r, w) as other:
+            await other.initialize()
+            taken = await _call(other, "join_board", key=key, nickname="acorn")
+            assert "'acorn' is taken" in taken and _marker_agent(taken) != old
+
+        store.mark_left(board.id, old)
+        async with stdio_client(_params(db_url, "codex", HUDDLEHUT_SESSION="thread-3")) as (r, w), \
+                   ClientSession(r, w) as later:
+            await later.initialize()
+            back = await _call(later, "join_board", key=key, nickname="acorn")
+            assert _marker_agent(back) == old
+            assert "You're acorn here (your name from before; your read position, files and promises carried over)." in back
+            assert await _call(later, "post", content="seeds rebuilt", kind="result", reply_to=1) == "ok #2"
+        assert store.owner_of(old) == "codex:thread-3"
+
+        async with stdio_client(_params(db_url, "codex", HUDDLEHUT_SESSION="thread-1")) as (r, w), \
+                   ClientSession(r, w) as returned:
+            await returned.initialize()
+            again = await _call(returned, "join_board", key=key, nickname="oak")
+            assert _marker_agent(again) != old and "You're oak here" in again
+
+    anyio.run(run)
+
+
+def test_departed_agents_drop_out_of_huddlers_and_now(store):
+    from huddlehut.compact import render_view
+    board, key = store.create_board("b", "p", "codex-aaaa")
+    store.set_nickname(board.id, "codex-aaaa", "acorn")
+    store.set_nickname(board.id, "codex-bbbb", "moss")
+    store.post(key, "codex-aaaa", "building fixtures", kind="status")
+    store.post(key, "codex-bbbb", "reviewing packet", kind="status")
+    store.mark_left(board.id, "codex-bbbb")
+    text, _ = render_view(store, board)
+    assert "acorn" in text and "building fixtures" in text
+    assert "moss" not in text and "reviewing packet" not in text
+
+
+def test_idle_agents_leave_the_huddlers_line(store):
+    from huddlehut.compact import render_view
+    board, key = store.create_board("b", "p", "codex-aaaa")
+    store.set_nickname(board.id, "codex-aaaa", "acorn")
+    store.set_nickname(board.id, "codex-bbbb", "sage")
+    store.db.execute("UPDATE presence SET seen_at=? WHERE agent='codex-bbbb'", (time.time() - IDLE_AFTER - 60,))
+    line = next(l for l in render_view(store, board)[0].splitlines() if l.startswith("Huddlers:"))
+    assert line == "Huddlers: acorn (+1 idle; @name wakes one)"

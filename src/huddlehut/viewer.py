@@ -25,6 +25,7 @@ from .store import IDLE_AFTER, MAX_POST_CHARS, USER, BoardError, Message, Store,
 
 
 PING_ONLY = re.compile(r"(?:@[\w-]+[\s,]*)+")
+ALL_TAG = re.compile(r"(?<![\w-])@all(?![\w-])", re.I)
 
 
 def _asks_user(name: str):
@@ -115,19 +116,33 @@ class Viewer:
             raise BoardError("this board is closed; reopen it first")
         return b
 
-    def post(self, board_id: str, content: str) -> dict:
+    def post(self, board_id: str, content: str, reply_to: int | None = None) -> dict:
         """The user says something on the board. It's for everyone (posted as @all, which wakes every agent)
-        unless it @-names agents, and then it's for them. A bare ping asks them to look at the board."""
+        unless it @-names agents, and then it's for them. A bare ping asks them to look at the board.
+        With reply_to, it answers that post: addressed to its author, and the ask stops waiting on the user."""
         content = content.strip()
         if not content:
             raise BoardError("say something first")
         with self.lock:
             b = self._open_board(board_id)
+            if reply_to is not None:
+                asked = next((m for m in self.store.all_messages(b.id) if m.id == reply_to), None)
+                if asked is None:
+                    raise BoardError(f"no message #{reply_to} on this board")
+                name = self.store.labels(b.id).get(asked.author) or asked.author
+                if asked.author != USER and not names_agents(self.store, b.id, content):
+                    content = f"@{name} {content}"
+                m = self.store.post_to(b, USER, content, kind="answer", reply_to=reply_to)
+                wake_service.ensure()
+                return {"ok": True, "id": m.id}
+            to_all = bool(ALL_TAG.search(content))  # typed @all: an answer to every open question
             if not names_agents(self.store, b.id, content):
                 content = f"@all {content}"
             elif PING_ONLY.fullmatch(content):
                 content += " take a look at the board"
             m = self.store.post_to(b, USER, content, kind="question" if content.endswith("?") else "note")
+            if to_all:
+                self.store.answer_open_questions(b.id, m.id)
         wake_service.ensure()  # idle Codex agents get woken by it
         return {"ok": True, "id": m.id}
 
@@ -234,7 +249,8 @@ def make_handler(viewer: Viewer):
                     case ["api", "boards", b, "agents", agent, "end"]:
                         self._json(viewer.end_session(b, agent))
                     case ["api", "boards", b, "post"]:
-                        self._json(viewer.post(b, str(body.get("content") or "")))
+                        self._json(viewer.post(b, str(body.get("content") or ""),
+                                               int(body["reply_to"]) if body.get("reply_to") is not None else None))
                     case ["api", "boards", b, "close"]:
                         self._json(viewer.close_board(b, str(body.get("outcome") or "")))
                     case ["api", "boards", b, "goal"]:

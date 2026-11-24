@@ -56,7 +56,8 @@ def is_postgres(url: str) -> bool:
 MAX_POST_CHARS = 1000
 # Each kind has a lifecycle that lets the board summarize itself without a model call:
 #   status    one live slot per agent; a new status replaces the old one in views
-#   question, blocker, promise   shown until any message replies to them (reply_to);
+#   question, blocker, promise   shown until any message replies to them (reply_to); a question also
+#             closes when the user answers everyone at once (@all), recorded in answered_by;
 #             a promise is something the author owes others ("will post when X is rebuilt")
 #   decision, result, deadend, answer   durable: kept (and eventually summarized)
 #   note      chatter: only the newest few are shown
@@ -177,7 +178,8 @@ CREATE TABLE IF NOT EXISTS messages (
     kind       TEXT NOT NULL,
     content    TEXT NOT NULL,
     created_at REAL NOT NULL,
-    reply_to   INTEGER
+    reply_to   INTEGER,
+    answered_by INTEGER
 );
 CREATE INDEX IF NOT EXISTS messages_board ON messages(board_id, id);
 CREATE TABLE IF NOT EXISTS cursors (
@@ -236,6 +238,7 @@ POSTGRES_SCHEMA = [
         kind TEXT NOT NULL, content TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL, reply_to BIGINT)""",
     "CREATE INDEX IF NOT EXISTS messages_board ON messages(board_id, id)",
     "CREATE INDEX IF NOT EXISTS messages_reply ON messages(reply_to)",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS answered_by BIGINT",
     """CREATE TABLE IF NOT EXISTS cursors (
         board_id TEXT NOT NULL, reader TEXT NOT NULL, last_id BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (board_id, reader))""",
@@ -312,6 +315,7 @@ class _Sqlite:
             ("boards", "compact_lock", "compact_lock REAL"),
             ("boards", "compact_error", "compact_error TEXT"),
             ("messages", "reply_to", "reply_to INTEGER"),
+            ("messages", "answered_by", "answered_by INTEGER"),
             ("claims", "locked", "locked INTEGER NOT NULL DEFAULT 0"),
             ("presence", "nickname", "nickname TEXT"),
             ("presence", "model", "model TEXT"),
@@ -683,17 +687,27 @@ class Store:
         """Questions and blockers nobody has replied to yet."""
         rows = self._all(
             "SELECT * FROM messages m WHERE board_id=? AND kind IN ('question','blocker','promise')"
+            " AND m.answered_by IS NULL"
             " AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id) ORDER BY id",
             (board_id,),
         )
         return [_message(r) for r in rows]
+
+    def answer_open_questions(self, board_id: str, answer_id: int) -> int:
+        """The user answered everyone (@all): every question still open before that answer counts as
+        answered by it. Blockers and promises stay open; they're closed by the work, not by a reply."""
+        open_ids = [m.id for m in self.open_items(board_id) if m.kind == "question" and m.id < answer_id]
+        for qid in open_ids:
+            self.db.execute("UPDATE messages SET answered_by = ? WHERE id = ? AND board_id = ?", (answer_id, qid, board_id))
+        return len(open_ids)
 
     def log_after(self, board_id: str, after_id: int) -> list[Message]:
         """Durable entries, answered questions/blockers and notes after a cutoff (statuses and open
         items are shown live from the whole board instead)."""
         rows = self._all(
             "SELECT * FROM messages m WHERE board_id=? AND id>? AND (kind IN ('decision','result','deadend','answer','note')"
-            " OR (kind IN ('question','blocker','promise') AND EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id)))"
+            " OR (kind IN ('question','blocker','promise') AND (m.answered_by IS NOT NULL"
+            " OR EXISTS (SELECT 1 FROM messages r WHERE r.reply_to = m.id))))"
             " ORDER BY id",
             (board_id, after_id),
         )
@@ -840,6 +854,13 @@ class Store:
                         " ON CONFLICT (client) DO UPDATE SET agent = excluded.agent", (client, agent, time.time()))
         return True
 
+    def take_identity(self, client: str, agent: str) -> None:
+        """Hand a departed agent's identity to this client session: the session that held it left, so it
+        gives it up (if that session ever comes back it starts as a new agent, not as this one)."""
+        self.db.execute("DELETE FROM identities WHERE agent = ? AND client != ?", (agent, client))
+        self.db.execute("INSERT INTO identities (client, agent, created_at) VALUES (?, ?, ?)"
+                        " ON CONFLICT (client) DO UPDATE SET agent = excluded.agent", (client, agent, time.time()))
+
     def owner_of(self, agent: str) -> str | None:
         """The client session that is this agent, if one is on record."""
         row = self._one("SELECT client FROM identities WHERE agent = ? ORDER BY created_at DESC LIMIT 1", (agent,))
@@ -864,14 +885,15 @@ class Store:
         return row["agent"] if row else None
 
     def dormant_holder(self, board_id: str, nickname: str, tool: str, client: str | None = None) -> str | None:
-        """The agent of the same tool that held this nickname here and has since gone idle or left: most
-        likely the same agent coming back after a restart. An active holder is someone else, and so is
-        one that belongs to another client session."""
+        """The agent of the same tool that held this nickname here and has since left or gone idle: the
+        same agent coming back. One that left is free for any session asking for its name (a resumed
+        Codex agent comes back on a new thread). One that is only idle stays with its own session, which
+        may still wake; an active holder is someone else."""
         cutoff = time.time() - IDLE_AFTER
         for agent, p in self.presence(board_id).items():
-            if (p.get("nickname") == nickname.strip().lower() and tool_of(agent) == tool
-                    and (p["state"] == "left" or p["seen_at"] < cutoff)
-                    and self.owner_of(agent) in (None, client)):
+            if p.get("nickname") != nickname.strip().lower() or tool_of(agent) != tool:
+                continue
+            if p["state"] == "left" or (p["seen_at"] < cutoff and self.owner_of(agent) in (None, client)):
                 return agent
         return None
 
