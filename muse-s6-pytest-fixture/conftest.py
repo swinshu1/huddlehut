@@ -3,6 +3,7 @@ import sys
 
 
 sys.dont_write_bytecode = True
+print("S6_PYTEST_DYNAMIC_CTRL_8452")
 
 
 def pytest_generate_tests(metafunc):
