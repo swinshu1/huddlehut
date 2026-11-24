@@ -161,3 +161,24 @@ def test_sessions_idle_for_days_are_ended(store):
     p = store.presence(board.id)
     assert p["old-agent"]["state"] == "left" and p["fresh-agent"]["state"] == "active"
     assert "timed out after 3 days without activity" in store.all_messages(board.id)[-1].content
+
+
+def test_answering_an_ask_stops_it_waiting_on_the_user(store, monkeypatch):
+    from huddlehut import wake_service
+    monkeypatch.setattr(wake_service, "ensure", lambda: None)
+    board, key = store.create_board("b", "p", "codex-aaaa")
+    store.set_nickname(board.id, "codex-aaaa", "lark")
+    store.set_nickname(board.id, "codex-bbbb", "pippin")
+    a = store.post(key, "codex-aaaa", "@user run Gate A now?", "question")
+    b = store.post(key, "codex-bbbb", "@user confirm Gate A?", "question")
+    v = Viewer(store)
+    assert {w["id"] for w in v.board(board.id)["waiting"]} == {a.id, b.id}
+
+    v.post(board.id, "yes, run it", reply_to=a.id)          # answered here
+    v.post(board.id, "done: answered elsewhere", reply_to=b.id)   # answered through another agent
+    assert v.board(board.id)["waiting"] == []
+    msgs = store.all_messages(board.id)
+    assert msgs[-2].content == "@lark yes, run it" and msgs[-2].reply_to == a.id and msgs[-2].kind == "answer"
+    assert msgs[-1].content.startswith("@pippin ")
+    with pytest.raises(Exception):
+        v.post(board.id, "hi", reply_to=9999)
