@@ -200,3 +200,13 @@ def test_departed_agents_drop_out_of_huddlers_and_now(store):
     text, _ = render_view(store, board)
     assert "acorn" in text and "building fixtures" in text
     assert "moss" not in text and "reviewing packet" not in text
+
+
+def test_idle_agents_leave_the_huddlers_line(store):
+    from huddlehut.compact import render_view
+    board, key = store.create_board("b", "p", "codex-aaaa")
+    store.set_nickname(board.id, "codex-aaaa", "acorn")
+    store.set_nickname(board.id, "codex-bbbb", "sage")
+    store.db.execute("UPDATE presence SET seen_at=? WHERE agent='codex-bbbb'", (time.time() - IDLE_AFTER - 60,))
+    line = next(l for l in render_view(store, board)[0].splitlines() if l.startswith("Huddlers:"))
+    assert line == "Huddlers: acorn (+1 idle; @name wakes one)"
