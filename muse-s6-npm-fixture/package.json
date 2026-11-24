@@ -1,0 +1,8 @@
+{
+  "name": "muse-s6-npm-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "files": [
+    "index.js"
+  ]
+}
