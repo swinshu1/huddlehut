@@ -1,1 +1,1 @@
-MARKER_ENABLED = False
+print("S6_PY_GUARD_CTRL_5472")
