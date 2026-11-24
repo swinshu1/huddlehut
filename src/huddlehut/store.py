@@ -840,6 +840,13 @@ class Store:
                         " ON CONFLICT (client) DO UPDATE SET agent = excluded.agent", (client, agent, time.time()))
         return True
 
+    def take_identity(self, client: str, agent: str) -> None:
+        """Hand a departed agent's identity to this client session: the session that held it left, so it
+        gives it up (if that session ever comes back it starts as a new agent, not as this one)."""
+        self.db.execute("DELETE FROM identities WHERE agent = ? AND client != ?", (agent, client))
+        self.db.execute("INSERT INTO identities (client, agent, created_at) VALUES (?, ?, ?)"
+                        " ON CONFLICT (client) DO UPDATE SET agent = excluded.agent", (client, agent, time.time()))
+
     def owner_of(self, agent: str) -> str | None:
         """The client session that is this agent, if one is on record."""
         row = self._one("SELECT client FROM identities WHERE agent = ? ORDER BY created_at DESC LIMIT 1", (agent,))
@@ -864,14 +871,15 @@ class Store:
         return row["agent"] if row else None
 
     def dormant_holder(self, board_id: str, nickname: str, tool: str, client: str | None = None) -> str | None:
-        """The agent of the same tool that held this nickname here and has since gone idle or left: most
-        likely the same agent coming back after a restart. An active holder is someone else, and so is
-        one that belongs to another client session."""
+        """The agent of the same tool that held this nickname here and has since left or gone idle: the
+        same agent coming back. One that left is free for any session asking for its name (a resumed
+        Codex agent comes back on a new thread). One that is only idle stays with its own session, which
+        may still wake; an active holder is someone else."""
         cutoff = time.time() - IDLE_AFTER
         for agent, p in self.presence(board_id).items():
-            if (p.get("nickname") == nickname.strip().lower() and tool_of(agent) == tool
-                    and (p["state"] == "left" or p["seen_at"] < cutoff)
-                    and self.owner_of(agent) in (None, client)):
+            if p.get("nickname") != nickname.strip().lower() or tool_of(agent) != tool:
+                continue
+            if p["state"] == "left" or (p["seen_at"] < cutoff and self.owner_of(agent) in (None, client)):
                 return agent
         return None
 

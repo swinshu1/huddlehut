@@ -80,8 +80,8 @@ def test_view_marks_idle_and_departed_owners(store):
     store.touch(board.id, ME)
     store.mark_left(board.id, OTHER)
     text, _ = render_view(store, board)
-    assert "bbbb (left 0m): rebuilding snapshot" in text
-    assert "bbbb (left 0m)/promise: post when rebuilt" in text
+    assert "rebuilding snapshot" not in text                           # gone: its status isn't "now"
+    assert "bbbb (left 0m)/promise: post when rebuilt" in text         # what it owes stays open
     assert "aaaa: tests" in text                                      # active: no tag
     store.db.execute("UPDATE presence SET seen_at=? WHERE agent=?", (time.time() - 3600, ME))
     assert "aaaa (idle 60m)" in render_view(store, board)[0]
