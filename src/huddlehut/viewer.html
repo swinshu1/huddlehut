@@ -366,7 +366,7 @@ function board(d) {
   const waiting = d.waiting.length ? `<ul class="waiting">${d.waiting.map(w => `<li>${who(w.author, w.name)}
       <div><div class="label">${w.source === "session" ? "waiting on you" : "asks you"}</div>${long(w.content, "w" + w.author + (w.id || ""))}${
         w.source === "board" && w.id && b.status === "open" ? `<div class="answer"><input id="reply-${w.id}" data-reply-input="${w.id}" value="${esc(replyDrafts[w.id] || "")}" maxlength="1000" autocomplete="off"
-          placeholder="answer ${esc(w.name)}" aria-label="answer ${esc(w.name)}"><button class="btn primary" data-reply="${w.id}"${working ? " disabled" : ""}>answer</button><button class="btn" data-done="${w.id}" title="already answered or no longer needed: stop showing it"${working ? " disabled" : ""}>done</button></div>` : ""}</div>
+          placeholder="answer ${esc(w.name)}" aria-label="answer ${esc(w.name)}"><button class="btn primary" data-reply="${w.id}"${working ? " disabled" : ""}>answer</button><button class="btn" data-done="${w.id}" title="already answered elsewhere or no longer needed: stop showing it"${working ? " disabled" : ""}>mark answered</button></div>` : ""}</div>
       <time>${w.at ? clock(w.at) : ""}</time></li>`).join("")}</ul>` : "";
   const older = d.message_count > d.stream.length ? `<p class="dim">${d.message_count - d.stream.length} older messages not shown.</p>` : "";
   const lessons = d.lessons ? `<p class="dim"><a href="#/memory">${d.lessons} lesson${d.lessons === 1 ? "" : "s"} saved from this board</a></p>` : "";
@@ -501,7 +501,7 @@ document.addEventListener("click", e => {
   const rp = e.target.closest("[data-reply]");
   if (rp) { answer(rp.dataset.reply, replyDrafts[rp.dataset.reply] || ""); return; }
   const dn = e.target.closest("[data-done]");
-  if (dn) { answer(dn.dataset.done, "done: answered elsewhere or no longer needed"); return; }
+  if (dn) { answer(dn.dataset.done, "marked answered"); return; }
   const pg = e.target.closest("[data-ping]");
   if (pg) { pingTo(pg.dataset.ping); return; }
   if (e.target.id === "edit-goal") { editGoal(); return; }

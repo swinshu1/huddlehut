@@ -182,3 +182,23 @@ def test_answering_an_ask_stops_it_waiting_on_the_user(store, monkeypatch):
     assert msgs[-1].content.startswith("@pippin ")
     with pytest.raises(Exception):
         v.post(board.id, "hi", reply_to=9999)
+
+
+def test_user_at_all_answers_every_open_question(store, monkeypatch):
+    from huddlehut import wake_service
+    monkeypatch.setattr(wake_service, "ensure", lambda: None)
+    board, key = store.create_board("b", "p", "codex-aaaa")
+    store.set_nickname(board.id, "codex-aaaa", "lark")
+    q1 = store.post(key, "codex-aaaa", "@user run Gate A?", "question")
+    q2 = store.post(key, "codex-bbbb", "@lark which packet?", "question")   # agent to agent counts too
+    bl = store.post(key, "codex-bbbb", "browser down", "blocker")
+    v = Viewer(store)
+
+    v.post(board.id, "status please")              # no typed @all: answers nothing
+    assert {m.id for m in store.open_items(board.id)} == {q1.id, q2.id, bl.id}
+
+    v.post(board.id, "@all all confirmations are go")
+    assert {m.id for m in store.open_items(board.id)} == {bl.id}   # blockers close by the work
+    assert v.board(board.id)["waiting"] == []
+    later = store.post(key, "codex-aaaa", "@user one more?", "question")
+    assert later.id in {m.id for m in store.open_items(board.id)}  # only questions asked before it

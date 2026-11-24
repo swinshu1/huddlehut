@@ -25,6 +25,7 @@ from .store import IDLE_AFTER, MAX_POST_CHARS, USER, BoardError, Message, Store,
 
 
 PING_ONLY = re.compile(r"(?:@[\w-]+[\s,]*)+")
+ALL_TAG = re.compile(r"(?<![\w-])@all(?![\w-])", re.I)
 
 
 def _asks_user(name: str):
@@ -134,11 +135,14 @@ class Viewer:
                 m = self.store.post_to(b, USER, content, kind="answer", reply_to=reply_to)
                 wake_service.ensure()
                 return {"ok": True, "id": m.id}
+            to_all = bool(ALL_TAG.search(content))  # typed @all: an answer to every open question
             if not names_agents(self.store, b.id, content):
                 content = f"@all {content}"
             elif PING_ONLY.fullmatch(content):
                 content += " take a look at the board"
             m = self.store.post_to(b, USER, content, kind="question" if content.endswith("?") else "note")
+            if to_all:
+                self.store.answer_open_questions(b.id, m.id)
         wake_service.ensure()  # idle Codex agents get woken by it
         return {"ok": True, "id": m.id}
 
